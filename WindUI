@@ -1,5 +1,5 @@
 --[[
-    WindUI v1.6.66 - Ye Performance Build r12 (legacy compact Dropdown width fix, fail-open)
+    WindUI v1.6.66 - Ye Performance Build r14 (nonlinear suction/restore motion, fail-open)
     Base library: Footagesus/WindUI (MIT)
     Official release pinned: v1.6.66
 
@@ -12,7 +12,7 @@
     6. Minimize/restore with one continuous lightweight proxy in ScreenGui
        screen-space. Both sides contract symmetrically and the calibrated path
        still lands exactly on the real Window/OpenButton. Minimize ends with a
-       directional damped-jelly impact along the incoming travel axis. Restore
+       single directional jelly landing along the incoming travel axis. Restore
        is faster, keeps a tiny late elastic overshoot, and uses a thin white
        edge highlight plus a restrained outer diffuse glow only while opening.
        The real control tree never resizes per-frame.
@@ -28,7 +28,7 @@
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r12-LEGACY-DROPDOWN-COMPACT-WIDTH"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r14-NONLINEAR-SUCTION-RESTORE"
 
 local YE_OFFICIAL_URL =
     "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
@@ -36,7 +36,7 @@ local YE_OFFICIAL_URL =
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r12_LegacyDropdownCompactWidth.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r14_NonlinearSuctionRestore.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -1127,7 +1127,7 @@ morph.WindowLayer.GroupTransparency=style
 morph.ButtonLayer.GroupTransparency=1-style
 end
 
--- Base travel remains linear and fast. Restore gets only a short late spring.
+-- Base travel is now intentionally nonlinear and fast. Restore gets only a short late spring.
 -- The opening highlight is deliberately edge-only: a thin white stroke plus
 -- a narrow diffuse outer halo. Both are forced fully transparent on the final
 -- frame so the normal Window never keeps a glow.
@@ -1137,7 +1137,24 @@ local started=os.clock()
 while true do
 local raw=(os.clock()-started)/duration
 local t=YE_GenieClamp01(raw)
-local p=reverse and(1-t)or t
+
+-- Nonlinear motion, but deliberately not the old slow Quint-style easing.
+--
+-- Minimize:
+--   starts only a little softer than linear, then continuously accelerates
+--   into the OpenButton. The directional jelly landing absorbs the impact.
+--
+-- Restore:
+--   launches quickly from the OpenButton, then eases naturally into the
+--   final Window geometry before the tiny late spring.
+local p
+if reverse then
+    local restoreProgress=1-((1-t)^1.65)
+    p=1-restoreProgress
+else
+    p=t^1.42
+end
+
 local scale=1
 local centerOffset=Vector2.zero
 
@@ -1183,28 +1200,97 @@ end
 -- One continuous damped oscillation along the actual incoming travel axis.
 -- This is deliberately not a chain of Tween endpoints, which was what made
 -- r7 look like a vibration instead of jelly inertia.
-local function YE_GenieJellyOpenButton(info,impactDirection)
-if not info
-or not info.Container
-or not aw.OpenButtonMain
-or not aw.Closed
-or aw.Destroyed then
+local function YE_GenieBounceOpenButton(openButtonMain,incomingDirection)
+if not openButtonMain or not openButtonMain.Button then
 return
 end
 
-local container=info.Container
-local scaleObj=info.ScaleObject
-local basePos=info.BasePosition or container.Position
-local baseScale=info.BaseScale or 1
-local direction=impactDirection or Vector2.new(0,-1)
-local duration=0.150
-local amplitude=5.4
+local container=openButtonMain.Container
+local button=openButtonMain.Button
+
+if not container or not button then
+return
+end
+
+local scaleObject=button:FindFirstChildOfClass"UIScale"
+if not scaleObject then
+scaleObject=Instance.new"UIScale"
+scaleObject.Scale=1
+scaleObject.Parent=button
+end
+
+local basePosition=container.Position
+local baseScale=scaleObject.Scale
+
+local direction=incomingDirection
+if typeof(direction)~="Vector2" or direction.Magnitude<0.001 then
+direction=Vector2.new(0,-1)
+else
+direction=direction.Unit
+end
+
+-- One directional jelly response only:
+-- 1) continue a little in the incoming direction
+-- 2) rebound slightly past the resting point
+-- 3) settle once
+--
+-- No sine wave, no repeated center crossings, so it reads as a soft impact
+-- instead of vibration/trembling.
+local duration=0.135
 local started=os.clock()
 
+local function smoothstep(x)
+x=math.clamp(x,0,1)
+return x*x*(3-2*x)
+end
+
 while true do
-if not aw.Closed or aw.Destroyed or not container.Parent then
+local t=math.clamp((os.clock()-started)/duration,0,1)
+
+local offset
+local scaleDelta
+
+if t<0.36 then
+local u=smoothstep(t/0.36)
+-- Incoming inertia: move 4.2px farther along the travel direction.
+offset=4.2*u
+-- Tiny directional squash impression.
+scaleDelta=-0.012*u
+elseif t<0.72 then
+local u=smoothstep((t-0.36)/0.36)
+-- Rebound only 1.7px to the opposite side.
+offset=4.2+( -5.9*u )
+scaleDelta=-0.012+(0.019*u)
+else
+local u=smoothstep((t-0.72)/0.28)
+-- Single soft settle from -1.7px back to rest.
+offset=-1.7+(1.7*u)
+scaleDelta=0.007*(1-u)
+end
+
+local dx=direction.X*offset
+local dy=direction.Y*offset
+
+container.Position=UDim2.new(
+basePosition.X.Scale,
+basePosition.X.Offset+dx,
+basePosition.Y.Scale,
+basePosition.Y.Offset+dy
+)
+
+scaleObject.Scale=baseScale*(1+scaleDelta)
+
+if t>=1 then
 break
 end
+
+YE_GenieRunService.RenderStepped:Wait()
+end
+
+container.Position=basePosition
+scaleObject.Scale=baseScale
+end
+
 
 local raw=(os.clock()-started)/duration
 local t=YE_GenieClamp01(raw)
@@ -1276,7 +1362,7 @@ end
 local impactDirection=morph.ImpactDirection
 YE_GenieApplyGeometry(morph,0,1,Vector2.zero)
 windowRoot.Visible=false
-YE_GenieRunMorph(morph,false,0.200)
+YE_GenieRunMorph(morph,false,0.185)
 
 if not aw.Closed or aw.Destroyed then
 return
@@ -1346,7 +1432,7 @@ end
 
 windowRoot.Visible=false
 YE_GenieApplyGeometry(morph,1,1,Vector2.zero)
-YE_GenieRunMorph(morph,true,0.215)
+YE_GenieRunMorph(morph,true,0.195)
 
 local finalGroup=morph.Group
 morph=nil
