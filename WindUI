@@ -1,5 +1,5 @@
 --[[
-    WindUI v1.6.66 - Ye Performance Build r6 (symmetric continuous minimize/restore, fail-open)
+    WindUI v1.6.66 - Ye Performance Build r7 (screen-space calibrated linear symmetric morph, fail-open)
     Base library: Footagesus/WindUI (MIT)
     Official release pinned: v1.6.66
 
@@ -9,9 +9,9 @@
     3. Debounce Squircle AbsoluteSize recalculation.
     4. Batch NewElements shape refreshes during mass control creation.
     5. Keep the window root at a stable size during Open.
-    6. Minimize/restore with one continuous lightweight proxy. No horizontal
-       bands are used. Both sides contract symmetrically around the center,
-       the proxy morphs into the OpenButton, and the same path reverses when
+    6. Minimize/restore with one continuous lightweight proxy in ScreenGui
+       screen-space. Both sides contract symmetrically with linear time/geometry,
+       the proxy morphs into the OpenButton, and the exact path reverses when
        reopening. The real control tree never resizes per-frame.
     7. Apply SetSize / fullscreen size / UIScale in one step instead of
        tweening the whole UI tree through many intermediate sizes.
@@ -22,7 +22,7 @@
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r6-GENIE-SYMMETRIC"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r7-GENIE-SCREENSPACE-LINEAR"
 
 local YE_OFFICIAL_URL =
     "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
@@ -30,7 +30,7 @@ local YE_OFFICIAL_URL =
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r6_GenieSymmetric.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r7_GenieScreenLinear.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -742,12 +742,11 @@ end
         mark(okFullscreen, "fullscreen-size-direct")
 
         -- ========================================================
-        -- Genie-style symmetric minimize / restore
+        -- Genie-style screen-space linear symmetric minimize / restore
         --
-        -- No strips, no ribbons, no sliced background. A single lightweight
-        -- proxy stays centered on its own axis while both sides contract by
-        -- exactly the same amount. The same geometry runs backward when the
-        -- OpenButton is clicked, so restore is animated too.
+        -- No strips/ribbons. One screen-space proxy keeps both sides symmetric.
+        -- Window and OpenButton centers are resolved from Position/AnchorPoint,
+        -- and the exact linear geometry is played backward for restore.
         -- ========================================================
         local genieHelper = [=[
 local YE_GenieRunService=game:GetService"RunService"
@@ -757,22 +756,6 @@ local YE_GenieWasMinimized=false
 
 local function YE_GenieClamp01(v)
 return math.clamp(v,0,1)
-end
-
-local function YE_GenieSmooth(v)
-v=YE_GenieClamp01(v)
-return v*v*(3-2*v)
-end
-
-local function YE_GenieSmoother(v)
-v=YE_GenieClamp01(v)
-return v*v*v*(v*(v*6-15)+10)
-end
-
-local function YE_GenieEaseOut(v)
-v=YE_GenieClamp01(v)
-local i=1-v
-return 1-i*i*i*i
 end
 
 local function YE_GenieLerp(a,b,t)
@@ -808,6 +791,56 @@ end
 end
 end
 
+local function YE_GenieScreenSize()
+local screen=av.WindUI and av.WindUI.ScreenGui
+if screen and screen.AbsoluteSize.X>1 and screen.AbsoluteSize.Y>1 then
+return screen.AbsoluteSize
+end
+
+local camera=workspace.CurrentCamera
+return camera and camera.ViewportSize or Vector2.new(1920,1080)
+end
+
+-- Resolve the screen-space point represented by GuiObject.Position. This
+-- deliberately does NOT use AbsolutePosition for the center because UIScale
+-- can make that disagree with the logical anchor-point position used by the
+-- real WindUI/OpenButton hierarchy.
+local function YE_GenieResolveCenter(gui,visualSize)
+if not gui then
+return nil
+end
+
+local parent=gui.Parent
+local origin=Vector2.zero
+local parentSize=YE_GenieScreenSize()
+
+while parent do
+if parent:IsA"GuiObject"then
+origin=parent.AbsolutePosition
+parentSize=parent.AbsoluteSize
+break
+elseif parent:IsA"ScreenGui"then
+origin=Vector2.zero
+parentSize=parent.AbsoluteSize
+break
+end
+parent=parent.Parent
+end
+
+local pos=gui.Position
+local anchorPoint=Vector2.new(
+origin.X+parentSize.X*pos.X.Scale+pos.X.Offset,
+origin.Y+parentSize.Y*pos.Y.Scale+pos.Y.Offset
+)
+
+local a=gui.AnchorPoint
+local size=visualSize or gui.AbsoluteSize
+return Vector2.new(
+anchorPoint.X+(0.5-a.X)*size.X,
+anchorPoint.Y+(0.5-a.Y)*size.Y
+)
+end
+
 local function YE_GenieGetButtonGeometry()
 if not aw.OpenButtonMain or not aw.OpenButtonMain.Button then
 return nil
@@ -821,42 +854,40 @@ end
 
 local scaleObj=button:FindFirstChildOfClass"UIScale"
 local baseScale=scaleObj and scaleObj.Scale or 1
-local size=container.AbsoluteSize
 
+-- The visible object is Button, not its transparent positioning Container.
+-- Prefer Button.AbsoluteSize so OnlyIcon/custom Scale configurations land on
+-- the exact rendered OpenButton dimensions.
+local size=button.AbsoluteSize
 if size.X<8 or size.Y<8 then
-size=button.AbsoluteSize
+size=container.AbsoluteSize
 end
 
 if size.X<8 or size.Y<8 then
-local textWidth=0
 local textButton=button:FindFirstChild"TextButton"
-if textButton then
-textWidth=textButton.AbsoluteSize.X
+local textSize=textButton and textButton.AbsoluteSize or Vector2.zero
+local baseHeight=button.Size.Y.Offset>8 and button.Size.Y.Offset or 44
+local baseWidth=textSize.X>8 and textSize.X or baseHeight
+
+local drag=button:FindFirstChild"Drag"
+if drag and drag.Visible and drag.AbsoluteSize.X>1 then
+baseWidth=baseWidth+drag.AbsoluteSize.X
 end
+
+local divider=button:FindFirstChildWhichIsA"Frame"
+if divider and divider.Name~="Drag" and divider.Visible and divider.AbsoluteSize.X<=4 then
+baseWidth=baseWidth+divider.AbsoluteSize.X+4
+end
+
 size=Vector2.new(
-math.max(64,(textWidth>1 and textWidth+44 or 132)*baseScale),
-math.max(30,44*baseScale)
+math.max(28,baseWidth*baseScale),
+math.max(28,baseHeight*baseScale)
 )
 end
 
-local pos=container.AbsolutePosition
-local center
-
-if container.AbsoluteSize.X>1 and container.AbsoluteSize.Y>1 then
-center=Vector2.new(
-pos.X+container.AbsoluteSize.X/2,
-pos.Y+container.AbsoluteSize.Y/2
-)
-else
-local screenSize=av.WindUI
-and av.WindUI.ScreenGui
-and av.WindUI.ScreenGui.AbsoluteSize
-or Vector2.new(1920,1080)
-local u=container.Position
-center=Vector2.new(
-screenSize.X*u.X.Scale+u.X.Offset,
-screenSize.Y*u.Y.Scale+u.Y.Offset
-)
+local center=YE_GenieResolveCenter(container,size)
+if not center then
+return nil
 end
 
 return {
@@ -904,8 +935,6 @@ clone.Position=UDim2.fromScale(0.5,0.5)
 clone.Size=UDim2.fromScale(1,1)
 clone.Active=false
 
--- Keep exactly one continuous background image. Remove resize/drag helpers
--- and every other shell child so there are no duplicated outlines or bands.
 local keepBG=YE_GenieFindBGImage(clone)
 for _,child in ipairs(clone:GetChildren())do
 if child~=keepBG then
@@ -956,34 +985,38 @@ clone.Parent=layer
 return layer
 end
 
-local function YE_GenieCreateMorph(windowRoot,buttonInfo,startAtButton)
+local function YE_GenieCreateMorph(windowRoot,buttonInfo)
 local shell=windowRoot and windowRoot.Background
-if not windowRoot or not shell or not buttonInfo then
+local screen=av.WindUI and av.WindUI.ScreenGui
+if not windowRoot or not shell or not buttonInfo or not screen then
 return nil
 end
 
-local windowPos=windowRoot.AbsolutePosition
 local windowSize=windowRoot.AbsoluteSize
 if windowSize.X<8 or windowSize.Y<8 then
+local globalScale=av.WindUI.UIScale or 1
 windowSize=Vector2.new(
-math.max(8,aw.Size.X.Offset),
-math.max(8,aw.Size.Y.Offset)
+math.max(8,aw.Size.X.Offset*globalScale),
+math.max(8,aw.Size.Y.Offset*globalScale)
 )
 end
 
-local windowCenter=Vector2.new(
-windowPos.X+windowSize.X/2,
-windowPos.Y+windowSize.Y/2
-)
+local windowCenter=YE_GenieResolveCenter(windowRoot,windowSize)
+if not windowCenter then
+return nil
+end
 
+-- Parent the proxy directly to ScreenGui. Every coordinate below is now in
+-- one screen-space, so Window/Folder/OpenButton nesting cannot introduce a
+-- local-position offset.
 local group=Instance.new"CanvasGroup"
-group.Name="YeGenieSymmetricMorph"
+group.Name="YeGenieScreenLinearMorph"
 group.BackgroundTransparency=1
 group.GroupTransparency=0
 group.AnchorPoint=Vector2.new(0.5,0.5)
 group.ClipsDescendants=false
 group.ZIndex=100000
-group.Parent=windowRoot.Parent
+group.Parent=screen
 
 local windowLayer=YE_GenieMakeWindowLayer(group,shell,100010)
 local buttonLayer=YE_GenieMakeButtonLayer(group,buttonInfo.Button,100020)
@@ -996,35 +1029,27 @@ WindowCenter=windowCenter,
 WindowSize=windowSize,
 ButtonCenter=buttonInfo.Center,
 ButtonSize=buttonInfo.Size,
-StartAtButton=startAtButton,
 }
 end
 
--- One continuous rectangle only. The width and height use different curves:
--- width contracts earlier than height, producing a symmetric "funnel/squeeze"
--- impression without cutting the surface into strips.
+-- Linear in time, linear in center position, linear in width/height.
+-- This removes r6's smootherstep/power curves that made the motion feel
+-- hesitant at the beginning and heavy at the end. Because the proxy remains
+-- center-anchored, left/right contraction is mathematically symmetric.
 local function YE_GenieApplyGeometry(morph,minimizeProgress)
 local p=YE_GenieClamp01(minimizeProgress)
-local moveE=YE_GenieSmoother(p)
-local widthE=1-(1-p)^2.65
-local heightE=YE_GenieSmoother(YE_GenieClamp01((p-0.08)/0.92))
 
-local cx=YE_GenieLerp(morph.WindowCenter.X,morph.ButtonCenter.X,moveE)
-local cy=YE_GenieLerp(morph.WindowCenter.Y,morph.ButtonCenter.Y,moveE)
-
-local w=YE_GenieLerp(morph.WindowSize.X,morph.ButtonSize.X,widthE)
-local h=YE_GenieLerp(morph.WindowSize.Y,morph.ButtonSize.Y,heightE)
-
--- Gentle symmetric squeeze in the middle. Both sides move inward by the
--- exact same amount; the center never shifts because of the deformation.
-local squeeze=math.sin(math.pi*p)
-local squeezeAmount=1-0.055*squeeze*squeeze
-w=math.max(4,w*squeezeAmount)
+local cx=YE_GenieLerp(morph.WindowCenter.X,morph.ButtonCenter.X,p)
+local cy=YE_GenieLerp(morph.WindowCenter.Y,morph.ButtonCenter.Y,p)
+local w=YE_GenieLerp(morph.WindowSize.X,morph.ButtonSize.X,p)
+local h=YE_GenieLerp(morph.WindowSize.Y,morph.ButtonSize.Y,p)
 
 morph.Group.Position=UDim2.fromOffset(cx,cy)
 morph.Group.Size=UDim2.fromOffset(math.max(4,w),math.max(4,h))
 
-local style=YE_GenieSmoother(YE_GenieClamp01((p-0.60)/0.40))
+-- Crossfade only near the end, also linearly. The geometry itself does not
+-- pause while the visual shell becomes the OpenButton.
+local style=YE_GenieClamp01((p-0.72)/0.28)
 morph.WindowLayer.GroupTransparency=style
 morph.ButtonLayer.GroupTransparency=1-style
 end
@@ -1057,12 +1082,12 @@ end
 
 local scaleObj=info.ScaleObject
 local base=info.BaseScale or 1
-scaleObj.Scale=base*0.80
+scaleObj.Scale=base*0.84
 
 local t1=YE_GenieTweenService:Create(
 scaleObj,
-TweenInfo.new(0.11,Enum.EasingStyle.Back,Enum.EasingDirection.Out),
-{Scale=base*1.12}
+TweenInfo.new(0.075,Enum.EasingStyle.Back,Enum.EasingDirection.Out),
+{Scale=base*1.10}
 )
 t1:Play()
 t1.Completed:Wait()
@@ -1074,8 +1099,8 @@ end
 
 local t2=YE_GenieTweenService:Create(
 scaleObj,
-TweenInfo.new(0.075,Enum.EasingStyle.Quad,Enum.EasingDirection.InOut),
-{Scale=base*0.965}
+TweenInfo.new(0.055,Enum.EasingStyle.Quad,Enum.EasingDirection.InOut),
+{Scale=base*0.975}
 )
 t2:Play()
 t2.Completed:Wait()
@@ -1087,7 +1112,7 @@ end
 
 YE_GenieTweenService:Create(
 scaleObj,
-TweenInfo.new(0.12,Enum.EasingStyle.Back,Enum.EasingDirection.Out),
+TweenInfo.new(0.07,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),
 {Scale=base}
 ):Play()
 end
@@ -1101,9 +1126,9 @@ if shell then
 shell.Size=UDim2.new(1,0,1,0)
 ap(
 shell,
-0.14,
+0.10,
 {Size=UDim2.new(0.97,0,0.94,0),ImageTransparency=1},
-Enum.EasingStyle.Quint,
+Enum.EasingStyle.Linear,
 Enum.EasingDirection.InOut
 ):Play()
 end
@@ -1129,14 +1154,14 @@ task.spawn(function()
 local morph=nil
 local ok,err=pcall(function()
 local windowRoot=aw.UIElements.Main
-morph=YE_GenieCreateMorph(windowRoot,info,false)
+morph=YE_GenieCreateMorph(windowRoot,info)
 if not morph then
-error("unable to create symmetric morph")
+error("unable to create screen-space morph")
 end
 
 YE_GenieApplyGeometry(morph,0)
 windowRoot.Visible=false
-YE_GenieRunMorph(morph,false,0.52)
+YE_GenieRunMorph(morph,false,0.29)
 
 if not aw.Closed or aw.Destroyed then
 return
@@ -1157,7 +1182,7 @@ end)
 YE_GenieDestroy(morph and morph.Group)
 
 if not ok then
-warn("[WindUI YePerf] symmetric minimize failed; using safe fallback: "..tostring(err))
+warn("[WindUI YePerf] screen-space minimize failed; using safe fallback: "..tostring(err))
 YE_GenieWasMinimized=false
 YE_GenieBusy=false
 
@@ -1171,15 +1196,11 @@ end
 
 YE_GenieSimpleFallback()
 elseif YE_GenieBusy then
--- Interrupted by an Open/Destroy during the morph.
 YE_GenieBusy=false
 end
 end)
 end
 
--- Reverse of the exact same geometry. This is intentionally synchronous:
--- Window:Open waits for the proxy to expand from OpenButton to the full
--- window, then the original WindUI code reveals the real control tree.
 local function YE_GenieRestore()
 if not YE_GenieWasMinimized or YE_GenieBusy then
 return
@@ -1203,21 +1224,18 @@ aw.OpenButtonMain:Visible(false)
 
 local morph=nil
 local ok,err=pcall(function()
-morph=YE_GenieCreateMorph(windowRoot,info,true)
+morph=YE_GenieCreateMorph(windowRoot,info)
 if not morph then
-error("unable to create reverse symmetric morph")
+error("unable to create reverse screen-space morph")
 end
 
 windowRoot.Visible=false
 YE_GenieApplyGeometry(morph,1)
-YE_GenieRunMorph(morph,true,0.46)
+YE_GenieRunMorph(morph,true,0.27)
 
--- Keep the proxy for a tiny hand-off window. The official Open code shows
--- the real window immediately after this function returns, so this covers
--- that one-frame transition instead of producing a flash.
 local finalGroup=morph.Group
 morph=nil
-task.delay(0.055,function()
+task.delay(0.025,function()
 YE_GenieDestroy(finalGroup)
 end)
 end)
@@ -1226,7 +1244,7 @@ YE_GenieDestroy(morph and morph.Group)
 YE_GenieBusy=false
 
 if not ok then
-warn("[WindUI YePerf] symmetric restore failed; opening normally: "..tostring(err))
+warn("[WindUI YePerf] screen-space restore failed; opening normally: "..tostring(err))
 end
 end
 
@@ -1287,6 +1305,18 @@ YE_GenieRestore()
                         openShell,
                         "window-open-light-animation"
                     )
+
+                    if okOpen then
+                        local okOpenDelay
+                        patched, okOpenDelay = yeReplaceOnceFrom(
+                            patched,
+                            openScope,
+                            'task.wait(0.06)\naw.Closed=false',
+                            'task.wait()\naw.Closed=false',
+                            "window-open-short-delay"
+                        )
+                        mark(okOpenDelay, "window-open-short-delay")
+                    end
                 end
             end
 
@@ -1327,7 +1357,7 @@ YE_GenieRestore()
             patched, okCloseWait = yeReplaceOnce(
                 patched,
                 'task.spawn(function()\ntask.wait(0.4)\n\nif not aw.Closed then',
-                'task.spawn(function()\ntask.wait(0.60)\n\nif not aw.Closed then',
+                'task.spawn(function()\ntask.wait(0.36)\n\nif not aw.Closed then',
                 "window-close-hide-delay"
             )
             mark(okCloseWait, "window-close-hide-delay")
@@ -1336,7 +1366,7 @@ YE_GenieRestore()
             patched, okDestroyWait = yeReplaceOnce(
                 patched,
                 'aw.Destroyed=true\n\ntask.wait(0.4)\n\nav.WindUI.ScreenGui:Destroy()',
-                'aw.Destroyed=true\n\ntask.wait(0.70)\n\nav.WindUI.ScreenGui:Destroy()',
+                'aw.Destroyed=true\n\ntask.wait(0.42)\n\nav.WindUI.ScreenGui:Destroy()',
                 "window-destroy-delay"
             )
             mark(okDestroyWait, "window-destroy-delay")
