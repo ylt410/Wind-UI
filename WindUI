@@ -1,5 +1,5 @@
 --[[
-    WindUI v1.6.66 - Ye Performance Build r2
+    WindUI v1.6.66 - Ye Performance Build r3 (fail-open)
     Base library: Footagesus/WindUI (MIT)
     Official release pinned: v1.6.66
 
@@ -13,20 +13,21 @@
     6. Apply SetSize / fullscreen size / UIScale in one step instead of
        tweening the whole UI tree through many intermediate sizes.
 
-    This file pins WindUI 1.6.66 commit 7b1d561 because the patches below
-    are matched against that exact compiled source structure.
+    This build deliberately avoids hard version / structure validation.
+    If an optimization patch does not match, it is skipped. If the optimized
+    source cannot start, the untouched official WindUI source is executed.
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r2"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r3"
 
 local YE_OFFICIAL_URL =
-    "https://raw.githubusercontent.com/Footagesus/WindUI/7b1d561/dist/main.lua"
+    "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
 
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r2.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r3.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -112,35 +113,31 @@ local function yeWriteFile(path, content)
 end
 
 local function yeLooksLikeCoreSource(source)
-    if type(source) ~= "string" or #source < 500000 then
+    if type(source) ~= "string" or #source < 1000 then
         return false
     end
 
+    -- Only reject obvious HTTP/error bodies. No version banner checks,
+    -- no minified-variable signatures, no "all patches must match" gate.
     if source:find("404: Not Found", 1, true)
-        or source:find("Repository not found", 1, true) then
+        or source:find("Repository not found", 1, true)
+        or source:find("<html", 1, true) then
         return false
-    end
-
-    -- WindUI 1.6.66 (commit 7b1d561) accidentally still carries
-    -- the v1.6.65 banner in dist/main.lua. Validate the pinned build
-    -- by stable structural signatures instead of that stale banner.
-    local required = {
-        "Roblox UI Library for scripts",
-        "https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua",
-        'function aw.Open(C)',
-        'function aw.Close(C)',
-        'function aw.SetUIScale(C,F)',
-        'Load=function(aa,af,ai,ak,al,am,an,ao,ap)',
-        'b.AddSignal(r:GetPropertyChangedSignal"AbsoluteSize",function()',
-    }
-
-    for _, marker in ipairs(required) do
-        if not source:find(marker, 1, true) then
-            return false
-        end
     end
 
     return true
+end
+
+local function yeSourceCompiles(source)
+    if not yeLooksLikeCoreSource(source) then
+        return false
+    end
+
+    local ok, chunk = pcall(function()
+        return loadstring(source)
+    end)
+
+    return ok and type(chunk) == "function"
 end
 
 local function yeLooksLikePatchedSource(source)
@@ -288,11 +285,7 @@ end
 
 local function yePatchWindUI(source)
     if not yeLooksLikeCoreSource(source) then
-        error(
-            "[WindUI YePerf] official source validation failed; expected WindUI v"
-                .. YE_WINDUI_BASE_VERSION,
-            0
-        )
+        return source
     end
 
     if source:find(YE_WINDUI_PATCH_ID, 1, true) then
@@ -613,13 +606,21 @@ end)
     end
 
     -- ============================================================
-    -- 3) Batch NewElements full shape refreshes during creation
+    -- 3) Batch NewElements shape refreshes during creation
+    --    Apply the pair all-or-nothing. If source layout differs,
+    --    skip it and leave the official code untouched.
     -- ============================================================
     do
         local loadMarker =
             'Load=function(aa,af,ai,ak,al,am,an,ao,ap)\nfor aq,ar in next,ai do'
+        local callMarker =
+            'if ak.NewElements then\naa:UpdateAllElementShapes(aa)\nend'
 
-        local loadReplacement = [=[
+        local canPatchLoad = yeFind(patched, loadMarker, 1) ~= nil
+        local canPatchCall = yeFind(patched, callMarker, 1) ~= nil
+
+        if canPatchLoad and canPatchCall then
+            local loadReplacement = [=[
 Load=function(aa,af,ai,ak,al,am,an,ao,ap)
 local YE_ShapeRefreshQueued=false
 
@@ -644,50 +645,37 @@ end
 for aq,ar in next,ai do
 ]=]
 
-        local okLoad
-        patched, okLoad = yeReplaceOnce(
-            patched,
-            loadMarker,
-            loadReplacement,
-            "shape-refresh-queue"
-        )
-        mark(okLoad, "shape-refresh-queue")
+            local okLoad
+            patched, okLoad = yeReplaceOnce(
+                patched,
+                loadMarker,
+                loadReplacement,
+                "shape-refresh-queue"
+            )
 
-        local okCall
-        patched, okCall = yeReplaceOnce(
-            patched,
-            'if ak.NewElements then\naa:UpdateAllElementShapes(aa)\nend',
-            'if ak.NewElements then\nYEQueueAllElementShapes()\nend',
-            "shape-refresh-call"
-        )
-        mark(okCall, "shape-refresh-call")
+            local okCall = false
+            if okLoad then
+                patched, okCall = yeReplaceOnce(
+                    patched,
+                    callMarker,
+                    'if ak.NewElements then\nYEQueueAllElementShapes()\nend',
+                    "shape-refresh-call"
+                )
+            end
+
+            mark(okLoad, "shape-refresh-queue")
+            mark(okCall, "shape-refresh-call")
+        else
+            mark(false, "shape-refresh-queue")
+            mark(false, "shape-refresh-call")
+        end
     end
 
     -- ============================================================
-    -- 4) Window root: stable size + lightweight shell-only animation
+    -- 4) Window / scale performance
+    --    No patch here is allowed to prevent WindUI from starting.
     -- ============================================================
     do
-        local windowScope = yeFind(
-            patched,
-            'aw.UIElements.Main=ao("Frame",{',
-            1
-        )
-
-        local okRootSize = false
-
-        if windowScope then
-            patched, okRootSize = yeReplaceOnceFrom(
-                patched,
-                windowScope,
-                'Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,0),',
-                'Size=aw.Size,\nVisible=false,',
-                "window-root-static-size"
-            )
-        end
-
-        mark(okRootSize, "window-root-static-size")
-
-        -- Public SetSize: one layout update instead of a tweened cascade.
         local setSizeReplacement = [=[
 function aw.SetSize(A,B)
 if typeof(B)=="UDim2"then
@@ -697,18 +685,20 @@ end
 end
 ]=]
 
-        local okSetSize
-        patched, okSetSize = yeReplaceRangeKeepEnd(
-            patched,
-            1,
-            'function aw.SetSize(A,B)',
-            'function aw.SetBackgroundImage(A,B)',
-            setSizeReplacement,
-            "window-setsize-direct"
-        )
+        local okSetSize = false
+        if yeFind(patched, 'function aw.SetSize(A,B)', 1)
+            and yeFind(patched, 'function aw.SetBackgroundImage(A,B)', 1) then
+            patched, okSetSize = yeReplaceRangeKeepEnd(
+                patched,
+                1,
+                'function aw.SetSize(A,B)',
+                'function aw.SetBackgroundImage(A,B)',
+                setSizeReplacement,
+                "window-setsize-direct"
+            )
+        end
         mark(okSetSize, "window-setsize-direct")
 
-        -- Fullscreen: size changes once; only position keeps a short tween.
         local fullscreenSetSize = [=[
 local function SetSize(C)
 local YE_TargetSize=not aw.IsFullscreen and B or UDim2.new(
@@ -730,31 +720,55 @@ Enum.EasingDirection.Out
 end
 ]=]
 
-        local fullscreenScope = yeFind(
-            patched,
-            'local function SetSize(C)',
-            yeFind(patched, 'function aw.SetAuthor(A,B)', 1) or 1
-        )
-
+        local fullscreenStart = yeFind(patched, 'local function SetSize(C)', 1)
+        local fullscreenEnd = fullscreenStart
+            and yeFind(patched, 'function aw.ToggleFullscreen(C)', fullscreenStart)
+            or nil
         local okFullscreen = false
 
-        if fullscreenScope then
+        if fullscreenStart and fullscreenEnd then
             patched, okFullscreen = yeReplaceRangeKeepEnd(
                 patched,
-                fullscreenScope,
+                fullscreenStart,
                 'local function SetSize(C)',
                 'function aw.ToggleFullscreen(C)',
                 fullscreenSetSize,
                 "fullscreen-size-direct"
             )
         end
-
         mark(okFullscreen, "fullscreen-size-direct")
 
-        -- Open: no root-height tween. Animate only the background shell 97.5% -> 100%.
-        local openShell = [=[
+        -- Open + Close are one atomic optimization pair. If either pattern
+        -- does not match, both stay exactly official.
+        local openScope = yeFind(patched, 'function aw.Open(C)', 1)
+        local closeScope = yeFind(patched, 'function aw.Close(C)', 1)
+        local openStart = openScope and yeFind(
+            patched,
+            'aw.UIElements.Main.Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,100)',
+            openScope
+        ) or nil
+        local openEnd = openStart and yeFind(
+            patched,
+            'if aw.UIElements.BackgroundGradient then',
+            openStart
+        ) or nil
+        local closeStart = closeScope and yeFind(
+            patched,
+            'ap(aw.UIElements.Main,0.9,{',
+            closeScope
+        ) or nil
+        local closeEnd = closeStart and yeFind(
+            patched,
+            'if aw.UIElements.BackgroundGradient then',
+            closeStart
+        ) or nil
+
+        local okOpen = false
+        local okClose = false
+
+        if openStart and openEnd and closeStart and closeEnd then
+            local openShell = [=[
 aw.UIElements.Main.Size=aw.Size
-aw.UIElements.Main.Visible=true
 
 local YE_WindowShell=aw.UIElements.Main.Background
 
@@ -772,24 +786,7 @@ end
 
 ]=]
 
-        local openScope = yeFind(patched, 'function aw.Open(C)', 1)
-        local okOpen = false
-
-        if openScope then
-            patched, okOpen = yeReplaceRangeKeepEnd(
-                patched,
-                openScope,
-                'aw.UIElements.Main.Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,100)',
-                'if aw.UIElements.BackgroundGradient then',
-                openShell,
-                "window-open-shell-animation"
-            )
-        end
-
-        mark(okOpen, "window-open-shell-animation")
-
-        -- Close: shrink only the decorative shell a little; the full UI tree keeps its size.
-        local closeShell = [=[
+            local closeShell = [=[
 local YE_WindowShell=aw.UIElements.Main.Background
 
 if YE_WindowShell then
@@ -804,43 +801,51 @@ end
 
 ]=]
 
-        local closeScope = yeFind(patched, 'function aw.Close(C)', 1)
-        local okClose = false
-
-        if closeScope then
-            patched, okClose = yeReplaceRangeKeepEnd(
+            patched, okOpen = yeReplaceRangeKeepEnd(
                 patched,
-                closeScope,
-                'ap(aw.UIElements.Main,0.9,{',
+                openScope,
+                'aw.UIElements.Main.Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,100)',
                 'if aw.UIElements.BackgroundGradient then',
-                closeShell,
-                "window-close-shell-animation"
+                openShell,
+                "window-open-shell-animation"
             )
+
+            closeScope = yeFind(patched, 'function aw.Close(C)', 1)
+            if okOpen and closeScope then
+                patched, okClose = yeReplaceRangeKeepEnd(
+                    patched,
+                    closeScope,
+                    'ap(aw.UIElements.Main,0.9,{',
+                    'if aw.UIElements.BackgroundGradient then',
+                    closeShell,
+                    "window-close-shell-animation"
+                )
+            end
         end
 
+        mark(okOpen, "window-open-shell-animation")
         mark(okClose, "window-close-shell-animation")
 
-        -- Shorter post-close hide delay.
-        local okCloseWait
-        patched, okCloseWait = yeReplaceOnce(
-            patched,
-            'task.spawn(function()\ntask.wait(0.4)\n\nif not aw.Closed then',
-            'task.spawn(function()\ntask.wait(0.18)\n\nif not aw.Closed then',
-            "window-close-hide-delay"
-        )
-        mark(okCloseWait, "window-close-hide-delay")
+        if okClose then
+            local okCloseWait
+            patched, okCloseWait = yeReplaceOnce(
+                patched,
+                'task.spawn(function()\ntask.wait(0.4)\n\nif not aw.Closed then',
+                'task.spawn(function()\ntask.wait(0.18)\n\nif not aw.Closed then',
+                "window-close-hide-delay"
+            )
+            mark(okCloseWait, "window-close-hide-delay")
 
-        -- Destroy can also finish sooner after the lightweight close animation.
-        local okDestroyWait
-        patched, okDestroyWait = yeReplaceOnce(
-            patched,
-            'aw.Destroyed=true\n\ntask.wait(0.4)\n\nav.WindUI.ScreenGui:Destroy()',
-            'aw.Destroyed=true\n\ntask.wait(0.22)\n\nav.WindUI.ScreenGui:Destroy()',
-            "window-destroy-delay"
-        )
-        mark(okDestroyWait, "window-destroy-delay")
+            local okDestroyWait
+            patched, okDestroyWait = yeReplaceOnce(
+                patched,
+                'aw.Destroyed=true\n\ntask.wait(0.4)\n\nav.WindUI.ScreenGui:Destroy()',
+                'aw.Destroyed=true\n\ntask.wait(0.22)\n\nav.WindUI.ScreenGui:Destroy()',
+                "window-destroy-delay"
+            )
+            mark(okDestroyWait, "window-destroy-delay")
+        end
 
-        -- Global UIScale tween causes every Squircle size listener to fire over many frames.
         local uiScaleReplacement = [=[
 function aw.SetUIScale(C,F)
 av.WindUI.UIScale=F
@@ -853,46 +858,19 @@ return aw
 end
 ]=]
 
-        local okUIScale
-        patched, okUIScale = yeReplaceRangeKeepEnd(
-            patched,
-            1,
-            'function aw.SetUIScale(C,F)',
-            'function aw.SetToTheCenter(C)',
-            uiScaleReplacement,
-            "uiscale-direct"
-        )
-        mark(okUIScale, "uiscale-direct")
-    end
-
-    local critical = {
-        ["icon-cache"] = true,
-        ["round-shape-debounce"] = true,
-        ["shape-refresh-queue"] = true,
-        ["shape-refresh-call"] = true,
-        ["window-root-static-size"] = true,
-        ["window-setsize-direct"] = true,
-        ["fullscreen-size-direct"] = true,
-        ["window-open-shell-animation"] = true,
-        ["window-close-shell-animation"] = true,
-        ["uiscale-direct"] = true,
-    }
-
-    local criticalFailed = {}
-
-    for _, label in ipairs(failed) do
-        if critical[label] then
-            criticalFailed[#criticalFailed + 1] = label
+        local okUIScale = false
+        if yeFind(patched, 'function aw.SetUIScale(C,F)', 1)
+            and yeFind(patched, 'function aw.SetToTheCenter(C)', 1) then
+            patched, okUIScale = yeReplaceRangeKeepEnd(
+                patched,
+                1,
+                'function aw.SetUIScale(C,F)',
+                'function aw.SetToTheCenter(C)',
+                uiScaleReplacement,
+                "uiscale-direct"
+            )
         end
-    end
-
-    if #criticalFailed > 0 then
-        error(
-            "[WindUI YePerf] critical patch mismatch: "
-                .. table.concat(criticalFailed, ", ")
-                .. ". The pinned official source may have changed.",
-            0
-        )
+        mark(okUIScale, "uiscale-direct")
     end
 
     patched =
@@ -910,7 +888,7 @@ end
 
     if #failed > 0 then
         warn(
-            "[WindUI YePerf] non-critical patches skipped: "
+            "[WindUI YePerf] patches skipped; official code kept for those parts: "
                 .. table.concat(failed, ", ")
         )
     end
@@ -957,33 +935,33 @@ end
 -- Fastest path: execute an already-patched local copy.
 local patchedCache = yeReadFile(YE_PATCHED_CACHE)
 
-if yeLooksLikePatchedSource(patchedCache) then
+if yeLooksLikePatchedSource(patchedCache) and yeSourceCompiles(patchedCache) then
     print("[WindUI YePerf] using patched local cache")
-    return yeCompileAndRun(patchedCache)
+    local okPatchedCache, cachedResult = pcall(yeCompileAndRun, patchedCache)
+    if okPatchedCache then
+        return cachedResult
+    end
+    warn("[WindUI YePerf] patched cache failed; ignoring it: " .. tostring(cachedResult))
 end
 
 -- Second path: use cached official source and patch it locally.
 local coreSource = yeReadFile(YE_CORE_CACHE)
 
-if not yeLooksLikeCoreSource(coreSource) then
+if not yeSourceCompiles(coreSource) then
     print("[WindUI YePerf] downloading official WindUI v" .. YE_WINDUI_BASE_VERSION)
 
     local fetched, fetchError =
         yeHttpGetWithTimeout(YE_OFFICIAL_URL, YE_CORE_HTTP_TIMEOUT)
 
-    if not yeLooksLikeCoreSource(fetched) then
-        -- If the timeout worker could not finish, make one normal request.
-        -- This only affects a cold start with no usable local cache.
+    if not yeSourceCompiles(fetched) then
         local okFallback, fallback = pcall(yeHttpGet, YE_OFFICIAL_URL)
 
-        if okFallback and yeLooksLikeCoreSource(fallback) then
+        if okFallback and yeSourceCompiles(fallback) then
             fetched = fallback
         else
             error(
-                "[WindUI YePerf] unable to load official WindUI v"
-                    .. YE_WINDUI_BASE_VERSION
-                    .. ": "
-                    .. tostring(fetchError or fallback),
+                "[WindUI YePerf] official WindUI could not be downloaded/compiled: "
+                    .. tostring(fetchError or (okFallback and "compile failed" or fallback)),
                 0
             )
         end
@@ -995,10 +973,25 @@ else
     print("[WindUI YePerf] using cached official source")
 end
 
-local optimizedSource = yePatchWindUI(coreSource)
+local patchOk, optimizedSource = pcall(yePatchWindUI, coreSource)
 
-if yeLooksLikePatchedSource(optimizedSource) then
-    yeWriteFile(YE_PATCHED_CACHE, optimizedSource)
+if not patchOk or type(optimizedSource) ~= "string" then
+    warn("[WindUI YePerf] optimizer failed; starting untouched official WindUI: " .. tostring(optimizedSource))
+    optimizedSource = coreSource
 end
 
-return yeCompileAndRun(optimizedSource)
+local runOk, result = pcall(yeCompileAndRun, optimizedSource)
+
+if runOk then
+    if optimizedSource ~= coreSource and yeLooksLikePatchedSource(optimizedSource) then
+        yeWriteFile(YE_PATCHED_CACHE, optimizedSource)
+    end
+    return result
+end
+
+if optimizedSource ~= coreSource then
+    warn("[WindUI YePerf] optimized build failed; falling back to untouched official WindUI: " .. tostring(result))
+    return yeCompileAndRun(coreSource)
+end
+
+error(tostring(result), 0)
