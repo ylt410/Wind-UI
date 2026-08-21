@@ -6,7 +6,7 @@ License: MIT
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r17-SEAMLESS-HANDOFF"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r18-RESTORE-END-CROSSFADE"
 
 local YE_OFFICIAL_URL =
     "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
@@ -14,7 +14,7 @@ local YE_OFFICIAL_URL =
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r17_SeamlessHandoff.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r18_RestoreEndCrossfade.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -1389,11 +1389,38 @@ windowRoot.Visible=false
 YE_GenieRunMorph(morph,true,0.220)
 
 YE_GenieSetRealWindowFinal(windowRoot)
-YE_GenieRunService.RenderStepped:Wait()
-YE_GenieHoldRealWindowFinal(windowRoot,0.43)
+YE_GenieHoldRealWindowFinal(windowRoot,0.46)
 
-YE_GenieDestroy(morph.Group)
+local finalGroup=morph.Group
 morph=nil
+
+task.spawn(function()
+YE_GenieRunService.RenderStepped:Wait()
+YE_GenieRunService.RenderStepped:Wait()
+
+local started=os.clock()
+local duration=0.055
+
+while finalGroup and finalGroup.Parent do
+if aw.Destroyed or aw.Closed then
+break
+end
+
+YE_GenieSetRealWindowFinal(windowRoot)
+
+local t=YE_GenieClamp01((os.clock()-started)/duration)
+local s=t*t*(3-2*t)
+finalGroup.GroupTransparency=s
+
+if t>=1 then
+break
+end
+
+YE_GenieRunService.RenderStepped:Wait()
+end
+
+YE_GenieDestroy(finalGroup)
+end)
 end)
 
 YE_GenieDestroy(morph and morph.Group)
