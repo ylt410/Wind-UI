@@ -1,34 +1,32 @@
 --[[
-    WindUI v1.6.66 - Ye Performance Build
+    WindUI v1.6.66 - Ye Performance Build r2
     Base library: Footagesus/WindUI (MIT)
     Official release pinned: v1.6.66
 
     Performance changes:
     1. Cache the official WindUI source locally.
-    2. Cache all six remote icon packs in NightHub_Cache/WindUI_Icons.
+    2. Cache the unified WindUI Main-v2 icon library in NightHub_Cache/WindUI_Icons.
     3. Debounce Squircle AbsoluteSize recalculation.
-    4. Lazy-create unused Highlight / Hover decoration layers.
-    5. Batch NewElements shape refreshes during mass control creation.
-    6. Batch Tab CanvasSize updates.
-    7. Keep the window root at a stable size during Open / Close.
+    4. Batch NewElements shape refreshes during mass control creation.
+    5. Keep the window root at a stable size during Open / Close.
        Only animate the lightweight background shell + transparency.
-    8. Apply SetSize / fullscreen size / UIScale in one step instead of
+    6. Apply SetSize / fullscreen size / UIScale in one step instead of
        tweening the whole UI tree through many intermediate sizes.
 
-    This file intentionally pins WindUI 1.6.66 because the patches below
-    match that release's compiled source structure.
+    This file pins WindUI 1.6.66 commit 7b1d561 because the patches below
+    are matched against that exact compiled source structure.
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r1"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r2"
 
 local YE_OFFICIAL_URL =
-    "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
+    "https://raw.githubusercontent.com/Footagesus/WindUI/7b1d561/dist/main.lua"
 
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r1.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r2.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -118,13 +116,28 @@ local function yeLooksLikeCoreSource(source)
         return false
     end
 
-    if not source:find("v1.6.66", 1, true) then
-        return false
-    end
-
     if source:find("404: Not Found", 1, true)
         or source:find("Repository not found", 1, true) then
         return false
+    end
+
+    -- WindUI 1.6.66 (commit 7b1d561) accidentally still carries
+    -- the v1.6.65 banner in dist/main.lua. Validate the pinned build
+    -- by stable structural signatures instead of that stale banner.
+    local required = {
+        "Roblox UI Library for scripts",
+        "https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua",
+        'function aw.Open(C)',
+        'function aw.Close(C)',
+        'function aw.SetUIScale(C,F)',
+        'Load=function(aa,af,ai,ak,al,am,an,ao,ap)',
+        'b.AddSignal(r:GetPropertyChangedSignal"AbsoluteSize",function()',
+    }
+
+    for _, marker in ipairs(required) do
+        if not source:find(marker, 1, true) then
+            return false
+        end
     end
 
     return true
@@ -299,287 +312,196 @@ local function yePatchWindUI(source)
     end
 
     -- ============================================================
-    -- 1) Icon pack source cache
+    -- 1) Unified Main-v2 icon source cache (WindUI 1.6.66 layout)
     -- ============================================================
     do
         local iconReplacement = [=[
-local YE_ICON_CACHE_ROOT="NightHub_Cache"
-local YE_ICON_CACHE_FOLDER=YE_ICON_CACHE_ROOT.."/WindUI_Icons"
-local YE_ICON_REFRESH_SECONDS=5*24*60*60
-local YE_ICON_REFRESH_TIMEOUT=6
+local l="https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua"
+local m
+
+if d:IsStudio()or not writefile then
+m=a.load'b'
+else
+local YE_ICON_ROOT="NightHub_Cache"
+local YE_ICON_FOLDER=YE_ICON_ROOT.."/WindUI_Icons"
+local YE_ICON_FILE=YE_ICON_FOLDER.."/Main-v2.lua"
 
 local function YEIconValid(source)
-local missingText="Not".." Found"
 return type(source)=="string"
-and #source>50
-and not source:find("404: "..missingText,1,true)
-and not source:find(missingText,1,true)
+and #source>1000
+and not source:find("404: Not Found",1,true)
+and not source:find("Repository not found",1,true)
+and source:find("SetIconsType",1,true)~=nil
 end
 
-local function YEIconCanRead()
-return type(isfile)=="function"and type(readfile)=="function"
-end
-
-local function YEIconCanWrite()
-return type(writefile)=="function"
-end
-
-local function YEIconEnsureFolders()
+local function YEIconEnsureFolder(path)
 if type(isfolder)~="function"or type(makefolder)~="function"then
 return false
 end
 
-local okRoot,rootExists=pcall(function()
-return isfolder(YE_ICON_CACHE_ROOT)
+local okExists,exists=pcall(function()
+return isfolder(path)
 end)
 
-if not okRoot then
+if not okExists then
 return false
 end
 
-if not rootExists then
-local madeRoot=pcall(function()
-makefolder(YE_ICON_CACHE_ROOT)
-end)
-
-if not madeRoot then
-return false
-end
-end
-
-local okFolder,folderExists=pcall(function()
-return isfolder(YE_ICON_CACHE_FOLDER)
-end)
-
-if not okFolder then
-return false
-end
-
-if not folderExists then
-local madeFolder=pcall(function()
-makefolder(YE_ICON_CACHE_FOLDER)
-end)
-
-if not madeFolder then
-return false
-end
-end
-
+if exists then
 return true
 end
 
-local function YEIconRead(path)
-if not YEIconCanRead()then
+return pcall(function()
+makefolder(path)
+end)
+end
+
+local function YEIconRead()
+if type(isfile)~="function"or type(readfile)~="function"then
 return nil
 end
 
 local okExists,exists=pcall(function()
-return isfile(path)
+return isfile(YE_ICON_FILE)
 end)
 
 if not okExists or not exists then
 return nil
 end
 
-local okRead,value=pcall(function()
-return readfile(path)
+local okRead,source=pcall(function()
+return readfile(YE_ICON_FILE)
 end)
 
-if okRead and YEIconValid(value)then
-return value
+if okRead and YEIconValid(source)then
+return source
 end
 
 return nil
 end
 
-local function YEIconWrite(path,value)
-if not YEIconCanWrite()or not YEIconValid(value)then
+local function YEIconWrite(source)
+if type(writefile)~="function"or not YEIconValid(source)then
 return false
 end
 
-YEIconEnsureFolders()
+YEIconEnsureFolder(YE_ICON_ROOT)
+YEIconEnsureFolder(YE_ICON_FOLDER)
 
 return pcall(function()
-writefile(path,value)
+writefile(YE_ICON_FILE,source)
 end)
 end
 
-local function YEIconReadTimestamp(path)
-if not YEIconCanRead()then
-return nil
+YEIconEnsureFolder(YE_ICON_ROOT)
+YEIconEnsureFolder(YE_ICON_FOLDER)
+
+local YEIconSource=YEIconRead()
+
+if not YEIconSource then
+local okFetch,fetched=pcall(function()
+return game.HttpGet and game:HttpGet(l)or h:GetAsync(l)
+end)
+
+if not okFetch or not YEIconValid(fetched)then
+error("[WindUI YePerf] unable to load WindUI Main-v2 icon library: "..tostring(fetched),0)
 end
 
+YEIconSource=fetched
+YEIconWrite(YEIconSource)
+end
+
+-- Main-v2 itself loads six remote icon packs. Patch only its local Get(url)
+-- helper so those packs are also cache-first instead of being downloaded
+-- on every UI startup.
+local YEGetStart=YEIconSource:find("local function Get(url)",1,true)
+local YELoadstringStart=YEGetStart and YEIconSource:find("local function Loadstring(src)",YEGetStart,true)or nil
+
+if YEGetStart and YELoadstringStart then
+local YEGetReplacement=[==[
+local YE_ICON_PACK_ROOT="NightHub_Cache/WindUI_Icons"
+
+local function YEIconPackValid(source)
+return type(source)=="string"
+and #source>100
+and not source:find("404: Not Found",1,true)
+and not source:find("Repository not found",1,true)
+end
+
+local function Get(url)
+local packName=url:match("/([^/]+)/dist/Icons%.lua")
+local cacheFile=packName and(YE_ICON_PACK_ROOT.."/"..packName..".lua")or nil
+
+if cacheFile and type(isfile)=="function"and type(readfile)=="function"then
 local okExists,exists=pcall(function()
-return isfile(path)
+return isfile(cacheFile)
 end)
 
-if not okExists or not exists then
-return nil
-end
-
-local okRead,value=pcall(function()
-return readfile(path)
+if okExists and exists then
+local okRead,cached=pcall(function()
+return readfile(cacheFile)
 end)
 
-if not okRead then
-return nil
-end
-
-local timestamp=tonumber(value)
-
-if not timestamp or timestamp<=0 then
-return nil
-end
-
-return timestamp
-end
-
-local function YEIconTouchTimestamp(path)
-if not YEIconCanWrite()then
-return false
-end
-
-YEIconEnsureFolders()
-
-return pcall(function()
-writefile(path,tostring(os.time()))
-end)
-end
-
-local function YEIconTimestampFresh(path)
-local timestamp=YEIconReadTimestamp(path)
-
-if not timestamp then
-return false
-end
-
-local age=os.time()-timestamp
-
-if age<0 then
-return true
-end
-
-return age<YE_ICON_REFRESH_SECONDS
-end
-
-local function YEIconNetworkGet(url)
-if IsExploit()then
-if type(game.HttpGetAsync)=="function"then
-local okAsync,resultAsync=pcall(function()
-return game:HttpGetAsync(url)
-end)
-
-if okAsync and YEIconValid(resultAsync)then
-return resultAsync
-end
-end
-
-return game:HttpGet(url)
-else
-local ok,result=pcall(function()
-return d:GetAsync(url)
-end)
-
-if ok then
-return result
-end
-
-return e:WaitForChild("Request",9999):InvokeServer{Url=url}
-end
-end
-
-local function YEIconFetchWithTimeout(url,timeoutSeconds)
-local finished=false
-local abandoned=false
-local result=nil
-
-local worker=task.spawn(function()
-local ok,value=pcall(YEIconNetworkGet,url)
-
-if abandoned then
-return
-end
-
-if ok and YEIconValid(value)then
-result=value
-end
-
-finished=true
-end)
-
-local started=os.clock()
-
-while not finished and os.clock()-started<timeoutSeconds do
-task.wait(0.05)
-end
-
-if not finished then
-abandoned=true
-
-if type(task.cancel)=="function"then
-pcall(task.cancel,worker)
-end
-
-return nil
-end
-
-return result
-end
-
-local function Get(f)
-local packName=f:match("/([^/]+)/dist/Icons%.lua")
-
-if not packName or not YEIconCanRead()or not YEIconCanWrite()then
-return YEIconNetworkGet(f)
-end
-
-YEIconEnsureFolders()
-
-local cacheFile=YE_ICON_CACHE_FOLDER.."/"..packName..".lua"
-local timestampFile=cacheFile..".timestamp"
-local cached=YEIconRead(cacheFile)
-
-if cached then
-if YEIconTimestampFresh(timestampFile)then
+if okRead and YEIconPackValid(cached)then
 return cached
 end
-
-local refreshed=YEIconFetchWithTimeout(f,YE_ICON_REFRESH_TIMEOUT)
-
-YEIconTouchTimestamp(timestampFile)
-
-if YEIconValid(refreshed)then
-YEIconWrite(cacheFile,refreshed)
-return refreshed
+end
 end
 
-return cached
+local fetched=game:HttpGet(url)
+
+if cacheFile and YEIconPackValid(fetched)and type(writefile)=="function"then
+pcall(function()
+if type(isfolder)=="function"and type(makefolder)=="function"and not isfolder("NightHub_Cache")then
+makefolder("NightHub_Cache")
 end
-
-local fetched=YEIconFetchWithTimeout(f,YE_ICON_REFRESH_TIMEOUT)
-
-if not YEIconValid(fetched)then
-fetched=YEIconNetworkGet(f)
+if type(isfolder)=="function"and type(makefolder)=="function"and not isfolder(YE_ICON_PACK_ROOT)then
+makefolder(YE_ICON_PACK_ROOT)
 end
-
-if YEIconValid(fetched)then
-YEIconWrite(cacheFile,fetched)
-YEIconTouchTimestamp(timestampFile)
+writefile(cacheFile,fetched)
+end)
 end
 
 return fetched
 end
+
+]==]
+
+YEIconSource=YEIconSource:sub(1,YEGetStart-1)
+..YEGetReplacement
+..YEIconSource:sub(YELoadstringStart)
+end
+
+local YEIconChunk,YEIconCompileError=loadstring(YEIconSource)
+
+if type(YEIconChunk)~="function"then
+error("[WindUI YePerf] cached Main-v2 icon library failed to compile: "..tostring(YEIconCompileError),0)
+end
+
+m=YEIconChunk()
+end
+
 ]=]
 
-        local ok
-        patched, ok = yeReplaceRangeKeepEnd(
+        local iconScope = yeFind(
             patched,
-            1,
-            'local function Get(f)\nif IsExploit()then',
-            'local function Loadstring(f)',
-            iconReplacement,
-            "icon-cache"
+            'local l="https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua"',
+            1
         )
+
+        local ok = false
+
+        if iconScope then
+            patched, ok = yeReplaceRangeKeepEnd(
+                patched,
+                iconScope,
+                'local l="https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua"',
+                'm.SetIconsType"lucide"',
+                iconReplacement,
+                "icon-cache"
+            )
+        end
+
         mark(ok, "icon-cache")
     end
 
@@ -589,6 +511,8 @@ end
     do
         local shapeReplacement = [=[
 local YE_ShapeResizeQueued=false
+local YE_LastShapeWidth=nil
+local YE_LastShapeHeight=nil
 
 local function YE_RecalculateRoundShape()
 local u=GetShape(m.Type)
@@ -603,6 +527,14 @@ local x=string.find(m.Type,"Outline")and"Outline"or nil
 
 local z=math.round(r.AbsoluteSize.X/b.UIScale)
 local A=math.round(r.AbsoluteSize.Y/b.UIScale)
+
+if z==YE_LastShapeWidth and A==YE_LastShapeHeight then
+return
+end
+
+YE_LastShapeWidth=z
+YE_LastShapeHeight=A
+
 local minSize=math.min(z,A)
 
 if minSize<=0 then
@@ -612,7 +544,6 @@ end
 local B=m.Radius~=0 and m.Radius or minSize/2
 local C=d.Shapes.Squircle.Radius/1024
 local F=B/minSize
-
 local G
 
 if z>A then
@@ -682,181 +613,7 @@ end)
     end
 
     -- ============================================================
-    -- 3) Lazy Highlight and Hover layers for Base Element
-    -- ============================================================
-    do
-        local baseScope = yeFind(
-            patched,
-            'local function CreateText(aq,ar)',
-            1
-        )
-
-        local lazyLayers = [=[
-local ax
-local ay,az
-
-local function YEEnsureHighlightLayers()
-if ax and ay and az then
-return
-end
-
-ax=ac(ah.UICorner,"Squircle-Outline",{
-Size=UDim2.new(1,0,1,0),
-ImageTransparency=1,
-Active=false,
-ThemeTag={
-ImageColor3="Text",
-},
-Parent=au,
-},{
-ab("UIListLayout",{
-FillDirection="Horizontal",
-VerticalAlignment="Center",
-HorizontalAlignment="Center",
-Padding=UDim.new(0,8),
-}),
-},nil,true)
-
-ay,az=ac(ah.UICorner,"Squircle",{
-Size=UDim2.new(1,0,1,0),
-ImageTransparency=1,
-Active=false,
-ThemeTag={
-ImageColor3="Text",
-},
-Parent=au,
-},{
-ab("UIListLayout",{
-FillDirection="Horizontal",
-VerticalAlignment="Center",
-HorizontalAlignment="Center",
-Padding=UDim.new(0,8),
-}),
-},nil,true)
-end
-
-if ag.Window.NewElements then
-YEEnsureHighlightLayers()
-end
-
-local aA
-local aB,b
-
-local function YEEnsureHoverLayers()
-if aA and aB and b then
-return
-end
-
-aA=ac(ah.UICorner,"Squircle-Outline",{
-Size=UDim2.new(1,0,1,0),
-ImageTransparency=1,
-Visible=false,
-Active=false,
-ThemeTag={
-ImageColor3="Text",
-},
-Parent=au,
-},{
-ab("UIListLayout",{
-FillDirection="Horizontal",
-VerticalAlignment="Center",
-HorizontalAlignment="Center",
-Padding=UDim.new(0,8),
-}),
-ab("UIGradient",{
-Name="HoverGradient",
-Color=ColorSequence.new{
-ColorSequenceKeypoint.new(0,Color3.new(1,1,1)),
-ColorSequenceKeypoint.new(0.5,Color3.new(1,1,1)),
-ColorSequenceKeypoint.new(1,Color3.new(1,1,1)),
-},
-Transparency=NumberSequence.new{
-NumberSequenceKeypoint.new(0,1),
-NumberSequenceKeypoint.new(0.25,0.9),
-NumberSequenceKeypoint.new(0.5,0.3),
-NumberSequenceKeypoint.new(0.75,0.9),
-NumberSequenceKeypoint.new(1,1),
-},
-}),
-},nil,true)
-
-aB,b=ac(ah.UICorner,"Squircle",{
-Size=UDim2.new(1,0,1,0),
-ImageTransparency=1,
-Active=false,
-ThemeTag={
-ImageColor3="Text",
-},
-Parent=au,
-},{
-ab("UIGradient",{
-Name="HoverGradient",
-Color=ColorSequence.new{
-ColorSequenceKeypoint.new(0,Color3.new(1,1,1)),
-ColorSequenceKeypoint.new(0.5,Color3.new(1,1,1)),
-ColorSequenceKeypoint.new(1,Color3.new(1,1,1)),
-},
-Transparency=NumberSequence.new{
-NumberSequenceKeypoint.new(0,1),
-NumberSequenceKeypoint.new(0.25,0.9),
-NumberSequenceKeypoint.new(0.5,0.3),
-NumberSequenceKeypoint.new(0.75,0.9),
-NumberSequenceKeypoint.new(1,1),
-},
-}),
-ab("UIListLayout",{
-FillDirection="Horizontal",
-VerticalAlignment="Center",
-HorizontalAlignment="Center",
-Padding=UDim.new(0,8),
-}),
-},nil,true)
-end
-
-if ah.Hover or ag.Window.NewElements then
-YEEnsureHoverLayers()
-end
-
-]=]
-
-        local okLayers = false
-
-        if baseScope then
-            patched, okLayers = yeReplaceRangeKeepEnd(
-                patched,
-                baseScope,
-                'local\nax=ac(ah.UICorner,"Squircle-Outline",{',
-                'local d,f=ac(ah.UICorner,"Squircle",{',
-                lazyLayers,
-                "lazy-element-decoration"
-            )
-        end
-
-        mark(okLayers, "lazy-element-decoration")
-
-        baseScope = yeFind(
-            patched,
-            'local function CreateText(aq,ar)',
-            1
-        ) or baseScope
-
-        local okHighlight = false
-
-        if baseScope then
-            patched, okHighlight = yeReplaceOnceFrom(
-                patched,
-                baseScope,
-                'function ah.Highlight(g)\nlocal h=ab("UIGradient",{',
-                'function ah.Highlight(g)\nYEEnsureHighlightLayers()\nlocal h=ab("UIGradient",{',
-                "lazy-highlight-entry"
-            )
-        end
-
-        mark(okHighlight, "lazy-highlight-entry")
-    end
-
-    -- ============================================================
-    -- 4) Batch NewElements full shape refreshes during creation
+    -- 3) Batch NewElements full shape refreshes during creation
     -- ============================================================
     do
         local loadMarker =
@@ -907,128 +664,7 @@ for aq,ar in next,ai do
     end
 
     -- ============================================================
-    -- 5) Batch Tab CanvasSize changes
-    -- ============================================================
-    do
-        local tabScope = yeFind(
-            patched,
-            'function ao.New(ap,aq)\nlocal ar={',
-            1
-        )
-
-        local okAuto = false
-        local okCanvasInsert = false
-
-        if tabScope then
-            local canvasFrameStart = yeFind(
-                patched,
-                'ar.UIElements.ContainerFrame=al("ScrollingFrame",{',
-                tabScope
-            )
-
-            local canvasFrameEnd = canvasFrameStart and yeFind(
-                patched,
-                'ar.UIElements.ContainerFrameCanvas=al("Frame",{',
-                canvasFrameStart
-            ) or nil
-
-            if canvasFrameStart and canvasFrameEnd then
-                local autoPos = yeFind(
-                    patched,
-                    'AutomaticCanvasSize="Y",',
-                    canvasFrameStart
-                )
-
-                if autoPos and autoPos < canvasFrameEnd then
-                    local old = 'AutomaticCanvasSize="Y",'
-                    local new = 'AutomaticCanvasSize="None",'
-
-                    patched = patched:sub(1, autoPos - 1)
-                        .. new
-                        .. patched:sub(autoPos + #old)
-
-                    okAuto = true
-
-                    canvasFrameEnd = yeFind(
-                        patched,
-                        'ar.UIElements.ContainerFrameCanvas=al("Frame",{',
-                        canvasFrameStart
-                    )
-
-                    local canvasBatch = [=[
-local YE_TabCanvasLayout=
-ar.UIElements.ContainerFrame:FindFirstChildOfClass("UIListLayout")
-local YE_TabCanvasQueued=false
-
-local function YEQueueTabCanvasUpdate()
-if YE_TabCanvasQueued then
-return
-end
-
-YE_TabCanvasQueued=true
-
-task.defer(function()
-YE_TabCanvasQueued=false
-
-local frame=ar.UIElements.ContainerFrame
-local layout=YE_TabCanvasLayout
-
-if not frame
-or not frame.Parent
-or not layout
-or not layout.Parent then
-return
-end
-
-local padding=frame:FindFirstChildOfClass("UIPadding")
-local extraY=0
-
-if padding then
-extraY=padding.PaddingTop.Offset+padding.PaddingBottom.Offset
-end
-
-local scale=tonumber(aq)or 1
-
-if scale<=0 then
-scale=1
-end
-
-frame.CanvasSize=UDim2.new(
-0,
-0,
-0,
-math.max(0,(layout.AbsoluteContentSize.Y/scale)+extraY)
-)
-end)
-end
-
-if YE_TabCanvasLayout then
-ak.AddSignal(
-YE_TabCanvasLayout:GetPropertyChangedSignal("AbsoluteContentSize"),
-YEQueueTabCanvasUpdate
-)
-YEQueueTabCanvasUpdate()
-end
-
-]=]
-
-                    if canvasFrameEnd then
-                        patched = patched:sub(1, canvasFrameEnd - 1)
-                            .. canvasBatch
-                            .. patched:sub(canvasFrameEnd)
-
-                        okCanvasInsert = true
-                    end
-                end
-            end
-        end
-
-        mark(okAuto, "tab-auto-canvas")
-        mark(okCanvasInsert, "tab-canvas-batch")
-    end
-
-    -- ============================================================
-    -- 6) Window root: stable size + lightweight shell-only animation
+    -- 4) Window root: stable size + lightweight shell-only animation
     -- ============================================================
     do
         local windowScope = yeFind(
@@ -1038,34 +674,18 @@ end
         )
 
         local okRootSize = false
-        local okRootVisible = false
 
         if windowScope then
             patched, okRootSize = yeReplaceOnceFrom(
                 patched,
                 windowScope,
                 'Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,0),',
-                'Size=aw.Size,',
+                'Size=aw.Size,\nVisible=false,',
                 "window-root-static-size"
-            )
-
-            windowScope = yeFind(
-                patched,
-                'aw.UIElements.Main=ao("Frame",{',
-                1
-            ) or windowScope
-
-            patched, okRootVisible = yeReplaceOnceFrom(
-                patched,
-                windowScope,
-                'AnchorPoint=Vector2.new(0.5,0.5),\nActive=true,\n},{',
-                'AnchorPoint=Vector2.new(0.5,0.5),\nActive=true,\nVisible=false,\n},{',
-                "window-root-initial-hidden"
             )
         end
 
         mark(okRootSize, "window-root-static-size")
-        mark(okRootVisible, "window-root-initial-hidden")
 
         -- Public SetSize: one layout update instead of a tweened cascade.
         local setSizeReplacement = [=[
@@ -1134,6 +754,7 @@ end
         -- Open: no root-height tween. Animate only the background shell 97.5% -> 100%.
         local openShell = [=[
 aw.UIElements.Main.Size=aw.Size
+aw.UIElements.Main.Visible=true
 
 local YE_WindowShell=aw.UIElements.Main.Background
 
@@ -1249,10 +870,9 @@ end
         ["round-shape-debounce"] = true,
         ["shape-refresh-queue"] = true,
         ["shape-refresh-call"] = true,
-        ["tab-auto-canvas"] = true,
-        ["tab-canvas-batch"] = true,
         ["window-root-static-size"] = true,
-        ["window-root-initial-hidden"] = true,
+        ["window-setsize-direct"] = true,
+        ["fullscreen-size-direct"] = true,
         ["window-open-shell-animation"] = true,
         ["window-close-shell-animation"] = true,
         ["uiscale-direct"] = true,
