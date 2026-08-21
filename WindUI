@@ -6,7 +6,7 @@ License: MIT
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r16-SOFT-GENIE"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r17-SEAMLESS-HANDOFF"
 
 local YE_OFFICIAL_URL =
     "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
@@ -14,7 +14,7 @@ local YE_OFFICIAL_URL =
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r16_SoftGenie.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r17_SeamlessHandoff.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -1223,6 +1223,51 @@ scaleObj.Scale=baseScale
 end
 end
 
+local function YE_GenieSetRealWindowFinal(windowRoot)
+if not windowRoot or not windowRoot.Parent then
+return
+end
+
+windowRoot.Size=aw.Size
+windowRoot.Visible=true
+
+local content=windowRoot:FindFirstChild("Main")
+if content then
+content.Visible=true
+end
+
+local background=windowRoot:FindFirstChild("Background")
+if background then
+background.ImageTransparency=aw.Transparent and av.WindUI.TransparencyValue or 0
+
+local bgImage=YE_GenieFindBGImage(background)
+if bgImage then
+bgImage.Visible=true
+bgImage.ImageTransparency=aw.BackgroundImageTransparency or 0
+end
+end
+
+local gradient=aw.UIElements and aw.UIElements.BackgroundGradient
+if gradient then
+gradient.ImageTransparency=0
+end
+end
+
+local function YE_GenieHoldRealWindowFinal(windowRoot,duration)
+local untilTime=os.clock()+(duration or 0.43)
+
+task.spawn(function()
+while os.clock()<untilTime do
+if aw.Destroyed or aw.Closed or not windowRoot or not windowRoot.Parent then
+break
+end
+
+YE_GenieSetRealWindowFinal(windowRoot)
+YE_GenieRunService.RenderStepped:Wait()
+end
+end)
+end
+
 local function YE_GenieSimpleFallback()
 local shell=aw.UIElements
 and aw.UIElements.Main
@@ -1267,6 +1312,7 @@ end
 
 local impactDirection=morph.ImpactDirection
 YE_GenieApplyGeometry(morph,0,1,Vector2.zero,0,0)
+YE_GenieRunService.RenderStepped:Wait()
 windowRoot.Visible=false
 YE_GenieRunMorph(morph,false,0.195)
 
@@ -1275,10 +1321,11 @@ return
 end
 
 YE_GenieWasMinimized=true
+aw.OpenButtonMain:Visible(true)
+YE_GenieRunService.RenderStepped:Wait()
+
 YE_GenieDestroy(morph.Group)
 morph=nil
-
-aw.OpenButtonMain:Visible(true)
 YE_GenieBusy=false
 
 task.spawn(function()
@@ -1327,7 +1374,6 @@ end
 
 YE_GenieBusy=true
 YE_GenieWasMinimized=false
-aw.OpenButtonMain:Visible(false)
 
 local morph=nil
 local ok,err=pcall(function()
@@ -1336,15 +1382,18 @@ if not morph then
 error("unable to create reverse screen-space morph")
 end
 
-windowRoot.Visible=false
 YE_GenieApplyGeometry(morph,1,1,Vector2.zero,1,1)
+YE_GenieRunService.RenderStepped:Wait()
+aw.OpenButtonMain:Visible(false)
+windowRoot.Visible=false
 YE_GenieRunMorph(morph,true,0.220)
 
-local finalGroup=morph.Group
+YE_GenieSetRealWindowFinal(windowRoot)
+YE_GenieRunService.RenderStepped:Wait()
+YE_GenieHoldRealWindowFinal(windowRoot,0.43)
+
+YE_GenieDestroy(morph.Group)
 morph=nil
-task.delay(0.015,function()
-YE_GenieDestroy(finalGroup)
-end)
 end)
 
 YE_GenieDestroy(morph and morph.Group)
