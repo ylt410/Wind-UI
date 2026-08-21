@@ -1,5 +1,5 @@
 --[[
-    WindUI v1.6.66 - Ye Performance Build r10 (r9 animation + legacy Dropdown autosize, fail-open)
+    WindUI v1.6.66 - Ye Performance Build r11 (legacy Dropdown full autosize, fail-open)
     Base library: Footagesus/WindUI (MIT)
     Official release pinned: v1.6.66
 
@@ -18,9 +18,9 @@
        The real control tree never resizes per-frame.
     7. Apply SetSize / fullscreen size / UIScale in one step instead of
        tweening the whole UI tree through many intermediate sizes.
-    8. Restore the v1.6.62 Dropdown vertical sizing behavior at runtime:
-       menu height follows real option content, shrinks for short lists,
-       grows only as items are added, and scrolls after the legacy cap.
+    8. Restore the v1.6.62 Dropdown sizing behavior at runtime:
+       height follows real option content and width follows the longest option
+       unless MenuWidth was explicitly supplied, matching the old compact menu.
 
     This build deliberately avoids hard version / structure validation.
     If an optimization patch does not match, it is skipped. If the optimized
@@ -28,7 +28,7 @@
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r10-LEGACY-DROPDOWN-AUTOSIZE"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r11-LEGACY-DROPDOWN-FULL-AUTOSIZE"
 
 local YE_OFFICIAL_URL =
     "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
@@ -36,7 +36,7 @@ local YE_OFFICIAL_URL =
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r10_LegacyDropdownAutosize.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r11_LegacyDropdownFullAutosize.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -1539,7 +1539,7 @@ end
 
 
 -- ============================================================
--- Legacy v1.6.62 Dropdown vertical sizing compatibility
+-- Legacy v1.6.62 Dropdown full sizing compatibility
 --
 -- Newer WindUI creates MenuCanvas at 300px high and relies on an immediate
 -- AbsoluteContentSize read to shrink it. With faster element creation that
@@ -1552,6 +1552,63 @@ end
 -- changes and also works on the untouched-official fail-open path.
 -- ============================================================
 local YE_LegacyDropdownRunService=game:GetService"RunService"
+
+local function yeLegacyDropdownMeasureWidth(dropdown)
+    local ui=dropdown and dropdown.UIElements
+    local menuCanvas=ui and ui.MenuCanvas
+
+    if not menuCanvas then
+        return nil
+    end
+
+    -- Old WindUI rule:
+    -- explicit MenuWidth wins; otherwise measure the widest option.
+    if dropdown.YeLegacyMenuWidthExplicit then
+        local explicit=tonumber(dropdown.YeLegacyMenuWidthValue)
+        if explicit then
+            return explicit
+        end
+    end
+
+    local maxContentWidth=0
+
+    if type(dropdown.Tabs)=="table" then
+        for _,tab in next,dropdown.Tabs do
+            local item=tab
+                and tab.UIElements
+                and tab.UIElements.TabItem
+
+            local frame=item and item:FindFirstChild"Frame"
+            local layout=frame and frame:FindFirstChildOfClass"UIListLayout"
+
+            if layout then
+                maxContentWidth=math.max(
+                    maxContentWidth,
+                    layout.AbsoluteContentSize.X
+                )
+            end
+        end
+    end
+
+    -- v1.6.62 added exactly 52px around the measured option content:
+    -- 6 + 6 + 5 + 5 + 18 + 6 + 6
+    local target=maxContentWidth+52
+
+    local constraint=menuCanvas:FindFirstChildOfClass"UISizeConstraint"
+    local minWidth=170
+    local maxWidth=300
+
+    if constraint then
+        if constraint.MinSize.X>0 then
+            minWidth=constraint.MinSize.X
+        end
+        if constraint.MaxSize.X>0 then
+            maxWidth=constraint.MaxSize.X
+        end
+    end
+
+    return math.clamp(target,minWidth,maxWidth)
+end
 
 local function yeLegacyDropdownReflow(dropdown)
     if type(dropdown)~="table" then
@@ -1572,17 +1629,14 @@ local function yeLegacyDropdownReflow(dropdown)
 
     local contentY=listLayout.AbsoluteContentSize.Y
 
-    -- v1.6.62 used MenuPadding=5, SearchBarHeight=39 and:
-    --   normal: MenuPadding*2
-    --   search: SearchBarHeight + MenuPadding*3
-    -- Derive these from the actual menu where possible so custom/newer
-    -- layouts still keep the same behavior instead of relying on magic only.
+    -- v1.6.62 vertical padding behavior.
     local menuPadding=5
     local paddingObject=menu:FindFirstChildOfClass"UIPadding"
 
     if paddingObject then
         local top=paddingObject.PaddingTop.Offset
         local bottom=paddingObject.PaddingBottom.Offset
+
         if top>0 then
             menuPadding=top
         elseif bottom>0 then
@@ -1603,27 +1657,20 @@ local function yeLegacyDropdownReflow(dropdown)
         extraY=searchHeight+(menuPadding*3)
     end
 
-    -- Exact old behavior: viewport * 0.6. The existing UISizeConstraint
-    -- still applies its own 400px ceiling, so use the smaller of both.
     local camera=workspace.CurrentCamera
     local maxHeight=(camera and camera.ViewportSize.Y or 720)*0.6
 
-    local sizeConstraint=menuCanvas:FindFirstChildOfClass"UISizeConstraint"
-    if sizeConstraint and sizeConstraint.MaxSize.Y>0 then
-        maxHeight=math.min(maxHeight,sizeConstraint.MaxSize.Y)
+    local constraint=menuCanvas:FindFirstChildOfClass"UISizeConstraint"
+    if constraint and constraint.MaxSize.Y>0 then
+        maxHeight=math.min(maxHeight,constraint.MaxSize.Y)
     end
 
     local targetHeight=math.clamp(contentY+extraY,0,maxHeight)
+    local targetWidth=yeLegacyDropdownMeasureWidth(dropdown)
+        or menuCanvas.AbsoluteSize.X
 
-    menuCanvas.Size=UDim2.new(
-        menuCanvas.Size.X.Scale,
-        menuCanvas.Size.X.Offset,
-        0,
-        targetHeight
-    )
+    menuCanvas.Size=UDim2.fromOffset(targetWidth,targetHeight)
 
-    -- Keep the scrolling range tied to actual option content as the old
-    -- implementation did.
     local frame=menu and menu:FindFirstChild"Frame"
     local scrollingFrame=frame and frame:FindFirstChildOfClass"ScrollingFrame"
 
@@ -1657,10 +1704,34 @@ local function yeInstallLegacyDropdown(dropdown)
     end
 
     dropdown.YeLegacyDropdownAutosize=true
+    dropdown.YeLegacyDropdownWidthConnections={}
 
-    -- The important part: when Roblox finishes a layout pass, immediately
-    -- resize the menu to the real number/height of options. Two options stay
-    -- two-options tall; filtering from ten items to two shrinks back down.
+    local function hookOptionWidths()
+        if type(dropdown.Tabs)~="table" then
+            return
+        end
+
+        for _,tab in next,dropdown.Tabs do
+            local item=tab
+                and tab.UIElements
+                and tab.UIElements.TabItem
+            local frame=item and item:FindFirstChild"Frame"
+            local layout=frame and frame:FindFirstChildOfClass"UIListLayout"
+
+            if layout and not dropdown.YeLegacyDropdownWidthConnections[layout] then
+                local okConn,conn=pcall(function()
+                    return layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                        yeLegacyDropdownQueueReflow(dropdown,false)
+                    end)
+                end)
+
+                if okConn then
+                    dropdown.YeLegacyDropdownWidthConnections[layout]=conn
+                end
+            end
+        end
+    end
+
     local okConnection,connection=pcall(function()
         return listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
             yeLegacyDropdownQueueReflow(dropdown,false)
@@ -1671,12 +1742,11 @@ local function yeInstallLegacyDropdown(dropdown)
         dropdown.YeLegacyDropdownAutosizeConnection=connection
     end
 
-    -- Reflow before opening so the internal placement calculation sees the
-    -- correct height, then once more after one layout frame for exact landing.
     if type(dropdown.Open)=="function" then
         local originalOpen=dropdown.Open
 
         dropdown.Open=function(self,...)
+            hookOptionWidths()
             pcall(yeLegacyDropdownReflow,self)
             local results=table.pack(originalOpen(self,...))
             yeLegacyDropdownQueueReflow(self,true)
@@ -1689,13 +1759,13 @@ local function yeInstallLegacyDropdown(dropdown)
 
         dropdown.Refresh=function(self,...)
             local results=table.pack(originalRefresh(self,...))
+            hookOptionWidths()
             yeLegacyDropdownQueueReflow(self,true)
             return table.unpack(results,1,results.n)
         end
     end
 
-    -- Creation happens before Roblox necessarily reports the final
-    -- AbsoluteContentSize, hence an immediate pass plus a one-frame pass.
+    hookOptionWidths()
     pcall(yeLegacyDropdownReflow,dropdown)
     yeLegacyDropdownQueueReflow(dropdown,true)
 
@@ -1713,7 +1783,18 @@ local function yeInstallLegacyDropdownContainer(container)
         local originalDropdown=container.Dropdown
 
         container.Dropdown=function(self,config)
+            config=config or {}
+
+            local hadExplicitMenuWidth=config.MenuWidth~=nil
+            local explicitMenuWidth=config.MenuWidth
+
             local dropdown=originalDropdown(self,config)
+
+            if type(dropdown)=="table" then
+                dropdown.YeLegacyMenuWidthExplicit=hadExplicitMenuWidth
+                dropdown.YeLegacyMenuWidthValue=explicitMenuWidth
+            end
+
             yeInstallLegacyDropdown(dropdown)
             return dropdown
         end
@@ -1808,7 +1889,7 @@ local function yeCompileAndRun(source)
     libraryOrError.YeOptimizationVersion = YE_WINDUI_PATCH_ID
     libraryOrError.YeBaseVersion = YE_WINDUI_BASE_VERSION
 
-    -- Restore the original v1.6.62 content-driven Dropdown menu height.
+    -- Restore the original v1.6.62 content-driven Dropdown width and height.
     -- This runtime hook is intentionally independent from source patch
     -- signatures, so a skipped optimization patch cannot remove it.
     yeInstallLegacyDropdownOnLibrary(libraryOrError)
