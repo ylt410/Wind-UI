@@ -1,34 +1,12 @@
 --[[
-    WindUI v1.6.66 - Ye Performance Build r15 (fixed nonlinear Genie + single jelly, fail-open)
-    Base library: Footagesus/WindUI (MIT)
-    Official release pinned: v1.6.66
-
-    Performance changes:
-    1. Cache the official WindUI source locally.
-    2. Cache the unified WindUI Main-v2 icon library in NightHub_Cache/WindUI_Icons.
-    3. Debounce Squircle AbsoluteSize recalculation.
-    4. Batch NewElements shape refreshes during mass control creation.
-    5. Keep the window root at a stable size during Open.
-    6. Minimize/restore with one continuous lightweight proxy in ScreenGui
-       screen-space. Both sides contract symmetrically and the calibrated path
-       still lands exactly on the real Window/OpenButton. Minimize ends with a
-       directional damped-jelly impact along the incoming travel axis. Restore
-       is faster, keeps a tiny late elastic overshoot, and uses a thin white
-       edge highlight plus a restrained outer diffuse glow only while opening.
-       The real control tree never resizes per-frame.
-    7. Apply SetSize / fullscreen size / UIScale in one step instead of
-       tweening the whole UI tree through many intermediate sizes.
-    8. Restore the v1.6.62 Dropdown sizing behavior at runtime:
-       height follows real option content and width follows the longest option
-       unless MenuWidth was explicitly supplied, matching the old compact menu.
-
-    This build deliberately avoids hard version / structure validation.
-    If an optimization patch does not match, it is skipped. If the optimized
-    source cannot start, the untouched official WindUI source is executed.
+WindUI
+Author: Footagesus (Footages, .ftgs, oftgs)
+Github: https://github.com/Footagesus/WindUI
+License: MIT
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r15-FIXED-NONLINEAR-GENIE"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r16-SOFT-GENIE"
 
 local YE_OFFICIAL_URL =
     "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
@@ -36,7 +14,7 @@ local YE_OFFICIAL_URL =
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r15_FixedNonlinearGenie.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r16_SoftGenie.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -126,8 +104,6 @@ local function yeLooksLikeCoreSource(source)
         return false
     end
 
-    -- Only reject obvious HTTP/error bodies. No version banner checks,
-    -- no minified-variable signatures, no "all patches must match" gate.
     if source:find("404: Not Found", 1, true)
         or source:find("Repository not found", 1, true)
         or source:find("<html", 1, true) then
@@ -313,9 +289,6 @@ local function yePatchWindUI(source)
         end
     end
 
-    -- ============================================================
-    -- 1) Unified Main-v2 icon source cache (WindUI 1.6.66 layout)
-    -- ============================================================
     do
         local iconReplacement = [=[
 local l="https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua"
@@ -413,9 +386,6 @@ YEIconSource=fetched
 YEIconWrite(YEIconSource)
 end
 
--- Main-v2 itself loads six remote icon packs. Patch only its local Get(url)
--- helper so those packs are also cache-first instead of being downloaded
--- on every UI startup.
 local YEGetStart=YEIconSource:find("local function Get(url)",1,true)
 local YELoadstringStart=YEGetStart and YEIconSource:find("local function Loadstring(src)",YEGetStart,true)or nil
 
@@ -507,9 +477,6 @@ end
         mark(ok, "icon-cache")
     end
 
-    -- ============================================================
-    -- 2) Debounce NewRoundFrame AbsoluteSize shape recalculation
-    -- ============================================================
     do
         local shapeReplacement = [=[
 local YE_ShapeResizeQueued=false
@@ -614,11 +581,6 @@ end)
         mark(ok, "round-shape-debounce")
     end
 
-    -- ============================================================
-    -- 3) Batch NewElements shape refreshes during creation
-    --    Apply the pair all-or-nothing. If source layout differs,
-    --    skip it and leave the official code untouched.
-    -- ============================================================
     do
         local loadMarker =
             'Load=function(aa,af,ai,ak,al,am,an,ao,ap)\nfor aq,ar in next,ai do'
@@ -680,10 +642,6 @@ for aq,ar in next,ai do
         end
     end
 
-    -- ============================================================
-    -- 4) Window / scale performance
-    --    No patch here is allowed to prevent WindUI from starting.
-    -- ============================================================
     do
         local setSizeReplacement = [=[
 function aw.SetSize(A,B)
@@ -747,14 +705,6 @@ end
         end
         mark(okFullscreen, "fullscreen-size-direct")
 
-        -- ========================================================
-        -- Genie-style directional jelly minimize / elastic glow restore
-        --
-        -- No strips/ribbons. One screen-space proxy keeps both sides symmetric.
-        -- The calibrated r7 screen coordinates are preserved. Minimize adds only
-        -- a directional damped-jelly landing; restore adds a tiny late spring and
-        -- a weak temporary glow, then lands on the exact real Window geometry.
-        -- ========================================================
         local genieHelper = [=[
 local YE_GenieRunService=game:GetService"RunService"
 local YE_GenieTweenService=game:GetService"TweenService"
@@ -1109,77 +1059,83 @@ RestoreDirection=-impactDirection,
 }
 end
 
-local function YE_GenieApplyGeometry(morph,minimizeProgress,visualScale,centerOffset)
-local p=YE_GenieClamp01(minimizeProgress)
+local function YE_GenieApplyGeometry(morph,positionProgress,visualScale,centerOffset,sizeProgress,layerMix)
+local pp=YE_GenieClamp01(positionProgress)
+local sp=YE_GenieClamp01(sizeProgress==nil and pp or sizeProgress)
 local scale=visualScale or 1
 local offset=centerOffset or Vector2.zero
 
-local cx=YE_GenieLerp(morph.WindowCenter.X,morph.ButtonCenter.X,p)+offset.X
-local cy=YE_GenieLerp(morph.WindowCenter.Y,morph.ButtonCenter.Y,p)+offset.Y
-local w=YE_GenieLerp(morph.WindowSize.X,morph.ButtonSize.X,p)*scale
-local h=YE_GenieLerp(morph.WindowSize.Y,morph.ButtonSize.Y,p)*scale
+local cx=YE_GenieLerp(morph.WindowCenter.X,morph.ButtonCenter.X,pp)+offset.X
+local cy=YE_GenieLerp(morph.WindowCenter.Y,morph.ButtonCenter.Y,pp)+offset.Y
+local w=YE_GenieLerp(morph.WindowSize.X,morph.ButtonSize.X,sp)*scale
+local h=YE_GenieLerp(morph.WindowSize.Y,morph.ButtonSize.Y,sp)*scale
 
 morph.Group.Position=UDim2.fromOffset(cx,cy)
 morph.Group.Size=UDim2.fromOffset(math.max(4,w),math.max(4,h))
 
-local style=YE_GenieClamp01((p-0.72)/0.28)
-morph.WindowLayer.GroupTransparency=style
-morph.ButtonLayer.GroupTransparency=1-style
+local mix
+if layerMix==nil then
+mix=YE_GenieClamp01((sp-0.72)/0.28)
+else
+mix=YE_GenieClamp01(layerMix)
 end
 
--- Base travel uses a mild custom nonlinear curve. Restore still gets only a short late spring.
--- The opening highlight is deliberately edge-only: a thin white stroke plus
--- a narrow diffuse outer halo. Both are forced fully transparent on the final
--- frame so the normal Window never keeps a glow.
+morph.WindowLayer.GroupTransparency=mix
+morph.ButtonLayer.GroupTransparency=1-mix
+end
+
 local function YE_GenieRunMorph(morph,reverse,duration)
 local started=os.clock()
+
+local function smoothstep(x)
+x=YE_GenieClamp01(x)
+return x*x*(3-2*x)
+end
 
 while true do
 local raw=(os.clock()-started)/duration
 local t=YE_GenieClamp01(raw)
 
--- Keep the custom proxy Genie motion, but remove the ruler-straight speed.
--- These are deliberately mild curves, not WindUI's original size tween.
---
--- Minimize: start with useful velocity, then accelerate into OpenButton.
--- Restore: launch quickly from OpenButton, then ease into final geometry.
-local p
-if reverse then
-local q=1-t
-local restoreProgress=1-(q*(0.55+0.45*q))
-p=1-restoreProgress
-else
-p=t*(0.55+0.45*t)
-end
-
+local positionP
+local sizeP
+local layerMix
 local scale=1
 local centerOffset=Vector2.zero
 
 if reverse then
-local springStart=0.72
+local inv=1-t
+local positionRestore=1-(inv^2.15)
+local sizeRestore=1-(inv^1.55)
+
+positionP=1-positionRestore
+sizeP=1-sizeRestore
+layerMix=1-smoothstep(t/0.42)
+
+local springStart=0.78
 if t>springStart then
 local u=YE_GenieClamp01((t-springStart)/(1-springStart))
-local envelope=(1-u)^1.55
-local wave=math.sin(u*math.pi*2)
-scale=1+(0.014*wave*envelope)
-centerOffset=morph.RestoreDirection*(2.4*wave*envelope)
+local s=math.sin(math.pi*u)
+local bump=s*s
+scale=1+(0.0075*bump)
+centerOffset=morph.RestoreDirection*(1.6*bump)
 end
 
--- Fast fade-in, visible mid-animation, then disappear before the real
--- Window is handed back. The diffuse layer is intentionally narrow so it
--- reads as scattered edge light instead of a white fog over the content.
-local glowT=YE_GenieClamp01((t-0.04)/0.90)
+local glowT=YE_GenieClamp01((t-0.03)/0.93)
 local glowWave=math.sin(math.pi*glowT)
 local diffuseStrength=0.30*(glowWave^0.90)
 local edgeStrength=0.56*(glowWave^0.72)
 morph.Glow.Diffuse.ImageTransparency=1-diffuseStrength
 morph.Glow.Stroke.Transparency=1-edgeStrength
 else
+positionP=t*(0.50+0.50*t)
+sizeP=t*(0.72+0.28*t)
+layerMix=smoothstep((t-0.66)/0.34)
+
 morph.Glow.Diffuse.ImageTransparency=1
 morph.Glow.Stroke.Transparency=1
 end
 
-YE_GenieApplyGeometry(morph,p,scale,centerOffset)
+YE_GenieApplyGeometry(morph,positionP,scale,centerOffset,sizeP,layerMix)
 
 if raw>=1 then
 break
@@ -1188,15 +1144,11 @@ end
 YE_GenieRunService.RenderStepped:Wait()
 end
 
--- Exact landing frame. No residual glow, overshoot or coordinate drift.
 morph.Glow.Diffuse.ImageTransparency=1
 morph.Glow.Stroke.Transparency=1
-YE_GenieApplyGeometry(morph,reverse and 0 or 1,1,Vector2.zero)
+YE_GenieApplyGeometry(morph,reverse and 0 or 1,1,Vector2.zero,reverse and 0 or 1,reverse and 0 or 1)
 end
 
--- One continuous damped oscillation along the actual incoming travel axis.
--- This is deliberately not a chain of Tween endpoints, which was what made
--- r7 look like a vibration instead of jelly inertia.
 local function YE_GenieJellyOpenButton(info,impactDirection)
 if not info
 or not info.Container
@@ -1218,11 +1170,6 @@ else
 direction=direction.Unit
 end
 
--- One soft directional impact, not a vibration:
---   0 -> +3.8px along incoming direction
---   +3.8 -> -1.25px
---   -1.25 -> 0
--- Only one rebound and one settle.
 local duration=0.125
 local started=os.clock()
 
@@ -1319,9 +1266,9 @@ error("unable to create screen-space morph")
 end
 
 local impactDirection=morph.ImpactDirection
-YE_GenieApplyGeometry(morph,0,1,Vector2.zero)
+YE_GenieApplyGeometry(morph,0,1,Vector2.zero,0,0)
 windowRoot.Visible=false
-YE_GenieRunMorph(morph,false,0.180)
+YE_GenieRunMorph(morph,false,0.195)
 
 if not aw.Closed or aw.Destroyed then
 return
@@ -1390,8 +1337,8 @@ error("unable to create reverse screen-space morph")
 end
 
 windowRoot.Visible=false
-YE_GenieApplyGeometry(morph,1,1,Vector2.zero)
-YE_GenieRunMorph(morph,true,0.190)
+YE_GenieApplyGeometry(morph,1,1,Vector2.zero,1,1)
+YE_GenieRunMorph(morph,true,0.220)
 
 local finalGroup=morph.Group
 morph=nil
@@ -1448,22 +1395,23 @@ end
                 ) or nil
 
                 if openStart and openEnd then
-                    local openShell = [=[
-if aw.OpenButtonMain then
-aw.OpenButtonMain:Visible(false)
-end
+                    local nativeOpen = patched:sub(openStart, openEnd - 1)
+                    local openShell =
+                        'if av.WindUI.UseNativeAnimation==true then\n'
+                        .. 'YE_GenieWasMinimized=false\nYE_GenieBusy=false\n'
+                        .. nativeOpen
+                        .. 'else\n'
+                        .. 'if aw.OpenButtonMain then\naw.OpenButtonMain:Visible(false)\nend\n\n'
+                        .. 'aw.UIElements.Main.Size=aw.Size\nYE_GenieRestore()\n'
+                        .. 'end\n\n'
 
-aw.UIElements.Main.Size=aw.Size
-YE_GenieRestore()
-
-]=]
                     patched, okOpen = yeReplaceRangeKeepEnd(
                         patched,
                         openScope,
                         'aw.UIElements.Main.Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,100)',
                         'if aw.UIElements.BackgroundGradient then',
                         openShell,
-                        "window-open-light-animation"
+                        "window-open-switchable-animation"
                     )
 
                     if okOpen then
@@ -1472,10 +1420,10 @@ YE_GenieRestore()
                             patched,
                             openScope,
                             'task.wait(0.06)\naw.Closed=false',
-                            'task.wait()\naw.Closed=false',
-                            "window-open-short-delay"
+                            'if av.WindUI.UseNativeAnimation==true then\ntask.wait(0.06)\nelse\ntask.wait()\nend\naw.Closed=false',
+                            "window-open-switchable-delay"
                         )
-                        mark(okOpenDelay, "window-open-short-delay")
+                        mark(okOpenDelay, "window-open-switchable-delay")
                     end
                 end
             end
@@ -1496,13 +1444,22 @@ YE_GenieRestore()
                 ) or nil
 
                 if closeStart and closeEnd then
+                    local nativeClose = patched:sub(closeStart, closeEnd - 1)
+                    local closeShell =
+                        'if av.WindUI.UseNativeAnimation==true then\n'
+                        .. 'YE_GenieWasMinimized=true\nYE_GenieBusy=false\n'
+                        .. nativeClose
+                        .. 'else\n'
+                        .. 'YE_GenieMinimize()\n'
+                        .. 'end\n\n'
+
                     patched, okClose = yeReplaceRangeKeepEnd(
                         patched,
                         closeScope,
                         closeTweenMarker,
                         'if aw.UIElements.BackgroundGradient then',
-                        'YE_GenieMinimize()\n\n',
-                        "window-close-genie-animation"
+                        closeShell,
+                        "window-close-switchable-animation"
                     )
                 end
             end
@@ -1517,8 +1474,8 @@ YE_GenieRestore()
             patched, okCloseWait = yeReplaceOnce(
                 patched,
                 'task.spawn(function()\ntask.wait(0.4)\n\nif not aw.Closed then',
-                'task.spawn(function()\ntask.wait(0.28)\n\nif not aw.Closed then',
-                "window-close-hide-delay"
+                'task.spawn(function()\nif av.WindUI.UseNativeAnimation==true then task.wait(0.4) else task.wait(0.28) end\n\nif not aw.Closed then',
+                "window-close-switchable-hide-delay"
             )
             mark(okCloseWait, "window-close-hide-delay")
 
@@ -1526,8 +1483,8 @@ YE_GenieRestore()
             patched, okDestroyWait = yeReplaceOnce(
                 patched,
                 'aw.Destroyed=true\n\ntask.wait(0.4)\n\nav.WindUI.ScreenGui:Destroy()',
-                'aw.Destroyed=true\n\ntask.wait(0.34)\n\nav.WindUI.ScreenGui:Destroy()',
-                "window-destroy-delay"
+                'aw.Destroyed=true\n\nif av.WindUI.UseNativeAnimation==true then task.wait(0.4) else task.wait(0.34) end\n\nav.WindUI.ScreenGui:Destroy()',
+                "window-destroy-switchable-delay"
             )
             mark(okDestroyWait, "window-destroy-delay")
         end
@@ -1560,9 +1517,7 @@ end
     end
 
     patched =
-        "-- " .. YE_WINDUI_PATCH_ID .. "\n"
-        .. "-- Base: official WindUI v" .. YE_WINDUI_BASE_VERSION .. "\n"
-        .. "-- Applied patches: " .. tostring(applied) .. "\n"
+        'local YE_WINDUI_BUILD_MARKER="' .. YE_WINDUI_PATCH_ID .. '"\n'
         .. patched
 
     print(
@@ -1583,19 +1538,6 @@ end
 end
 
 
--- ============================================================
--- Legacy v1.6.62 Dropdown full sizing compatibility
---
--- Newer WindUI creates MenuCanvas at 300px high and relies on an immediate
--- AbsoluteContentSize read to shrink it. With faster element creation that
--- read can happen before Roblox finishes the layout pass, leaving a menu
--- visibly taller than its options. The old UI effectively behaved as
--- content-driven: short lists stayed short, long lists grew until the
--- viewport cap, then scrolled.
---
--- This is installed after WindUI loads, so it survives source minification
--- changes and also works on the untouched-official fail-open path.
--- ============================================================
 local YE_LegacyDropdownRunService=game:GetService"RunService"
 
 local function yeLegacyDropdownMeasureWidth(dropdown)
@@ -1608,9 +1550,6 @@ local function yeLegacyDropdownMeasureWidth(dropdown)
         if explicit then return explicit end
     end
 
-    -- r11 bug: measuring the row UIListLayout measured the row itself,
-    -- not the text, so current menu width fed back into the next width.
-    -- Measure only the visible title text and add the old fixed chrome space.
     local renderScale=1
     if menuCanvas.Size.X.Scale==0 and menuCanvas.Size.X.Offset>1 and menuCanvas.AbsoluteSize.X>1 then
         renderScale=menuCanvas.AbsoluteSize.X/menuCanvas.Size.X.Offset
@@ -1640,7 +1579,6 @@ local function yeLegacyDropdownMeasureWidth(dropdown)
         end
     end
 
-    -- Old compact look: text width plus icon/padding/check space.
     local target=maxTextWidth+52
     local constraint=menuCanvas:FindFirstChildOfClass"UISizeConstraint"
     local minWidth=170
@@ -1672,7 +1610,6 @@ local function yeLegacyDropdownReflow(dropdown)
 
     local contentY=listLayout.AbsoluteContentSize.Y
 
-    -- v1.6.62 vertical padding behavior.
     local menuPadding=5
     local paddingObject=menu:FindFirstChildOfClass"UIPadding"
 
@@ -1843,9 +1780,6 @@ local function yeInstallLegacyDropdownContainer(container)
         end
     end
 
-    -- WindUI can nest elements in Sections/Groups/stacks. Wrap those return
-    -- objects too so Dropdowns do not revert to the new fixed-looking height
-    -- merely because they live one level deeper.
     for _,methodName in ipairs({"Section","Group","HStack","VStack"})do
         local original=container[methodName]
 
@@ -1888,8 +1822,6 @@ local function yeInstallLegacyDropdownOnLibrary(library)
                 end
             end
 
-            -- Sidebar sections can also expose element containers depending on
-            -- WindUI version/config, so make this harmlessly recursive too.
             yeInstallLegacyDropdownContainer(window)
         end
 
@@ -1931,16 +1863,24 @@ local function yeCompileAndRun(source)
     libraryOrError.YeOptimized = true
     libraryOrError.YeOptimizationVersion = YE_WINDUI_PATCH_ID
     libraryOrError.YeBaseVersion = YE_WINDUI_BASE_VERSION
+    libraryOrError.UseNativeAnimation = false
 
-    -- Restore the original v1.6.62 content-driven Dropdown width and height.
-    -- This runtime hook is intentionally independent from source patch
-    -- signatures, so a skipped optimization patch cannot remove it.
+    function libraryOrError:SetAnimationMode(mode)
+        if mode == "Native" or mode == true then
+            self.UseNativeAnimation = true
+        elseif mode == "Custom" or mode == "New" or mode == false then
+            self.UseNativeAnimation = false
+        else
+            error("Animation mode must be Native or Custom", 2)
+        end
+        return self
+    end
+
     yeInstallLegacyDropdownOnLibrary(libraryOrError)
 
     return libraryOrError
 end
 
--- Fastest path: execute an already-patched local copy.
 local patchedCache = yeReadFile(YE_PATCHED_CACHE)
 
 if yeLooksLikePatchedSource(patchedCache) and yeSourceCompiles(patchedCache) then
@@ -1952,7 +1892,6 @@ if yeLooksLikePatchedSource(patchedCache) and yeSourceCompiles(patchedCache) the
     warn("[WindUI YePerf] patched cache failed; ignoring it: " .. tostring(cachedResult))
 end
 
--- Second path: use cached official source and patch it locally.
 local coreSource = yeReadFile(YE_CORE_CACHE)
 
 if not yeSourceCompiles(coreSource) then
