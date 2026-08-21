@@ -1,5 +1,5 @@
 --[[
-    WindUI v1.6.66 - Ye Performance Build r8 (directional jelly + elastic restore glow, fail-open)
+    WindUI v1.6.66 - Ye Performance Build r9 (fast directional jelly + edge highlight glow, fail-open)
     Base library: Footagesus/WindUI (MIT)
     Official release pinned: v1.6.66
 
@@ -13,7 +13,8 @@
        screen-space. Both sides contract symmetrically and the calibrated path
        still lands exactly on the real Window/OpenButton. Minimize ends with a
        directional damped-jelly impact along the incoming travel axis. Restore
-       adds only a tiny late elastic overshoot and a temporary weak glow.
+       is faster, keeps a tiny late elastic overshoot, and uses a thin white
+       edge highlight plus a restrained outer diffuse glow only while opening.
        The real control tree never resizes per-frame.
     7. Apply SetSize / fullscreen size / UIScale in one step instead of
        tweening the whole UI tree through many intermediate sizes.
@@ -24,7 +25,7 @@
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r8-GENIE-JELLY-GLOW"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r9-FAST-JELLY-EDGE-GLOW"
 
 local YE_OFFICIAL_URL =
     "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
@@ -32,7 +33,7 @@ local YE_OFFICIAL_URL =
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r8_GenieJellyGlow.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r9_FastJellyEdgeGlow.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -1001,21 +1002,59 @@ return layer
 end
 
 local function YE_GenieMakeGlow(parent,z)
-local glow=Instance.new"ImageLabel"
-glow.Name="YeGenieRestoreGlow"
+local glow=Instance.new"Frame"
+glow.Name="YeGenieRestoreEdgeGlow"
 glow.BackgroundTransparency=1
 glow.AnchorPoint=Vector2.new(0.5,0.5)
 glow.Position=UDim2.fromScale(0.5,0.5)
-glow.Size=UDim2.new(1,68,1,68)
-glow.Image="rbxassetid://8992230677"
-glow.ImageColor3=Color3.fromRGB(220,235,255)
-glow.ImageTransparency=1
-glow.ScaleType=Enum.ScaleType.Slice
-glow.SliceCenter=Rect.new(99,99,99,99)
+glow.Size=UDim2.fromScale(1,1)
 glow.ZIndex=z
 glow.Active=false
 glow.Parent=parent
-return glow
+
+local diffuse=Instance.new"ImageLabel"
+diffuse.Name="Diffuse"
+diffuse.BackgroundTransparency=1
+diffuse.AnchorPoint=Vector2.new(0.5,0.5)
+diffuse.Position=UDim2.fromScale(0.5,0.5)
+diffuse.Size=UDim2.new(1,24,1,24)
+diffuse.Image="rbxassetid://8992230677"
+diffuse.ImageColor3=Color3.fromRGB(255,255,255)
+diffuse.ImageTransparency=1
+diffuse.ScaleType=Enum.ScaleType.Slice
+diffuse.SliceCenter=Rect.new(99,99,99,99)
+diffuse.ZIndex=z
+diffuse.Active=false
+diffuse.Parent=glow
+
+local edgeFrame=Instance.new"Frame"
+edgeFrame.Name="Edge"
+edgeFrame.BackgroundTransparency=1
+edgeFrame.AnchorPoint=Vector2.new(0.5,0.5)
+edgeFrame.Position=UDim2.fromScale(0.5,0.5)
+edgeFrame.Size=UDim2.new(1,2,1,2)
+edgeFrame.ZIndex=z+1
+edgeFrame.Active=false
+edgeFrame.Parent=glow
+
+local corner=Instance.new"UICorner"
+corner.CornerRadius=UDim.new(0,math.max(8,aw.UICorner or 16))
+corner.Parent=edgeFrame
+
+local stroke=Instance.new"UIStroke"
+stroke.Name="Highlight"
+stroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border
+stroke.LineJoinMode=Enum.LineJoinMode.Round
+stroke.Thickness=1.15
+stroke.Color=Color3.fromRGB(255,255,255)
+stroke.Transparency=1
+stroke.Parent=edgeFrame
+
+return {
+Root=glow,
+Diffuse=diffuse,
+Stroke=stroke,
+}
 end
 
 local function YE_GenieCreateMorph(windowRoot,buttonInfo)
@@ -1085,10 +1124,10 @@ morph.WindowLayer.GroupTransparency=style
 morph.ButtonLayer.GroupTransparency=1-style
 end
 
--- Base travel stays linear, preserving r7's calibrated feel. Only the last
--- part of restore receives a very small damped overshoot. The glow is a
--- temporary halo that is mathematically forced back to fully transparent on
--- the final frame.
+-- Base travel remains linear and fast. Restore gets only a short late spring.
+-- The opening highlight is deliberately edge-only: a thin white stroke plus
+-- a narrow diffuse outer halo. Both are forced fully transparent on the final
+-- frame so the normal Window never keeps a glow.
 local function YE_GenieRunMorph(morph,reverse,duration)
 local started=os.clock()
 
@@ -1100,20 +1139,27 @@ local scale=1
 local centerOffset=Vector2.zero
 
 if reverse then
-local springStart=0.66
+local springStart=0.72
 if t>springStart then
 local u=YE_GenieClamp01((t-springStart)/(1-springStart))
-local envelope=(1-u)^1.7
+local envelope=(1-u)^1.55
 local wave=math.sin(u*math.pi*2)
-scale=1+(0.018*wave*envelope)
-centerOffset=morph.RestoreDirection*(3.2*wave*envelope)
+scale=1+(0.014*wave*envelope)
+centerOffset=morph.RestoreDirection*(2.4*wave*envelope)
 end
 
-local glowWave=math.sin(math.pi*t)
-local glowStrength=0.13*(glowWave^1.35)
-morph.Glow.ImageTransparency=1-glowStrength
+-- Fast fade-in, visible mid-animation, then disappear before the real
+-- Window is handed back. The diffuse layer is intentionally narrow so it
+-- reads as scattered edge light instead of a white fog over the content.
+local glowT=YE_GenieClamp01((t-0.04)/0.90)
+local glowWave=math.sin(math.pi*glowT)
+local diffuseStrength=0.30*(glowWave^0.90)
+local edgeStrength=0.56*(glowWave^0.72)
+morph.Glow.Diffuse.ImageTransparency=1-diffuseStrength
+morph.Glow.Stroke.Transparency=1-edgeStrength
 else
-morph.Glow.ImageTransparency=1
+morph.Glow.Diffuse.ImageTransparency=1
+morph.Glow.Stroke.Transparency=1
 end
 
 YE_GenieApplyGeometry(morph,p,scale,centerOffset)
@@ -1126,7 +1172,8 @@ YE_GenieRunService.RenderStepped:Wait()
 end
 
 -- Exact landing frame. No residual glow, overshoot or coordinate drift.
-morph.Glow.ImageTransparency=1
+morph.Glow.Diffuse.ImageTransparency=1
+morph.Glow.Stroke.Transparency=1
 YE_GenieApplyGeometry(morph,reverse and 0 or 1,1,Vector2.zero)
 end
 
@@ -1147,8 +1194,8 @@ local scaleObj=info.ScaleObject
 local basePos=info.BasePosition or container.Position
 local baseScale=info.BaseScale or 1
 local direction=impactDirection or Vector2.new(0,-1)
-local duration=0.235
-local amplitude=6.5
+local duration=0.150
+local amplitude=5.4
 local started=os.clock()
 
 while true do
@@ -1158,13 +1205,13 @@ end
 
 local raw=(os.clock()-started)/duration
 local t=YE_GenieClamp01(raw)
-local envelope=(1-t)^2.15
-local wave=math.sin(t*math.pi*3)
+local envelope=(1-t)^2.0
+local wave=math.sin(t*math.pi*2.25)
 local offset=direction*(amplitude*wave*envelope)
 
 container.Position=YE_GenieOffsetPosition(basePos,offset)
 if scaleObj then
-scaleObj.Scale=baseScale*(1+0.014*wave*envelope)
+scaleObj.Scale=baseScale*(1+0.010*wave*envelope)
 end
 
 if raw>=1 then
@@ -1226,7 +1273,7 @@ end
 local impactDirection=morph.ImpactDirection
 YE_GenieApplyGeometry(morph,0,1,Vector2.zero)
 windowRoot.Visible=false
-YE_GenieRunMorph(morph,false,0.275)
+YE_GenieRunMorph(morph,false,0.200)
 
 if not aw.Closed or aw.Destroyed then
 return
@@ -1296,7 +1343,7 @@ end
 
 windowRoot.Visible=false
 YE_GenieApplyGeometry(morph,1,1,Vector2.zero)
-YE_GenieRunMorph(morph,true,0.295)
+YE_GenieRunMorph(morph,true,0.215)
 
 local finalGroup=morph.Group
 morph=nil
@@ -1309,7 +1356,7 @@ YE_GenieDestroy(morph and morph.Group)
 YE_GenieBusy=false
 
 if not ok then
-warn("[WindUI YePerf] elastic glow restore failed; opening normally: "..tostring(err))
+warn("[WindUI YePerf] fast edge-glow restore failed; opening normally: "..tostring(err))
 end
 end
 
@@ -1422,7 +1469,7 @@ YE_GenieRestore()
             patched, okCloseWait = yeReplaceOnce(
                 patched,
                 'task.spawn(function()\ntask.wait(0.4)\n\nif not aw.Closed then',
-                'task.spawn(function()\ntask.wait(0.36)\n\nif not aw.Closed then',
+                'task.spawn(function()\ntask.wait(0.28)\n\nif not aw.Closed then',
                 "window-close-hide-delay"
             )
             mark(okCloseWait, "window-close-hide-delay")
@@ -1431,7 +1478,7 @@ YE_GenieRestore()
             patched, okDestroyWait = yeReplaceOnce(
                 patched,
                 'aw.Destroyed=true\n\ntask.wait(0.4)\n\nav.WindUI.ScreenGui:Destroy()',
-                'aw.Destroyed=true\n\ntask.wait(0.42)\n\nav.WindUI.ScreenGui:Destroy()',
+                'aw.Destroyed=true\n\ntask.wait(0.34)\n\nav.WindUI.ScreenGui:Destroy()',
                 "window-destroy-delay"
             )
             mark(okDestroyWait, "window-destroy-delay")
