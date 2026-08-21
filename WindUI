@@ -1,5 +1,5 @@
 --[[
-    WindUI v1.6.66 - Ye Performance Build r3 (fail-open)
+    WindUI v1.6.66 - Ye Performance Build r4 (Genie minimize, fail-open)
     Base library: Footagesus/WindUI (MIT)
     Official release pinned: v1.6.66
 
@@ -8,9 +8,11 @@
     2. Cache the unified WindUI Main-v2 icon library in NightHub_Cache/WindUI_Icons.
     3. Debounce Squircle AbsoluteSize recalculation.
     4. Batch NewElements shape refreshes during mass control creation.
-    5. Keep the window root at a stable size during Open / Close.
-       Only animate the lightweight background shell + transparency.
-    6. Apply SetSize / fullscreen size / UIScale in one step instead of
+    5. Keep the window root at a stable size during Open.
+    6. Minimize with a lightweight Genie-style proxy made from a few
+       horizontal shell slices; the real control tree never resizes per-frame.
+       The proxy morphs into the OpenButton, then the real OpenButton pops.
+    7. Apply SetSize / fullscreen size / UIScale in one step instead of
        tweening the whole UI tree through many intermediate sizes.
 
     This build deliberately avoids hard version / structure validation.
@@ -19,7 +21,7 @@
 ]]
 
 local YE_WINDUI_BASE_VERSION = "1.6.66"
-local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r3"
+local YE_WINDUI_PATCH_ID = "YE-WINDUI-1.6.66-PERF-r4-GENIE"
 
 local YE_OFFICIAL_URL =
     "https://github.com/Footagesus/WindUI/releases/download/1.6.66/main.lua"
@@ -27,7 +29,7 @@ local YE_OFFICIAL_URL =
 local YE_CACHE_ROOT = "NightHub_Cache"
 local YE_CACHE_FOLDER = YE_CACHE_ROOT .. "/WindUI_Optimized"
 local YE_CORE_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_core.lua"
-local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r3.lua"
+local YE_PATCHED_CACHE = YE_CACHE_FOLDER .. "/WindUI_1.6.66_YePerf_r4_Genie.lua"
 
 local YE_CORE_HTTP_TIMEOUT = 10
 
@@ -738,36 +740,521 @@ end
         end
         mark(okFullscreen, "fullscreen-size-direct")
 
-        -- Open + Close are one atomic optimization pair. If either pattern
-        -- does not match, both stay exactly official.
-        local openScope = yeFind(patched, 'function aw.Open(C)', 1)
-        local closeScope = yeFind(patched, 'function aw.Close(C)', 1)
-        local openStart = openScope and yeFind(
-            patched,
-            'aw.UIElements.Main.Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,100)',
-            openScope
-        ) or nil
-        local openEnd = openStart and yeFind(
-            patched,
-            'if aw.UIElements.BackgroundGradient then',
-            openStart
-        ) or nil
-        local closeStart = closeScope and yeFind(
-            patched,
-            'ap(aw.UIElements.Main,0.9,{',
-            closeScope
-        ) or nil
-        local closeEnd = closeStart and yeFind(
-            patched,
-            'if aw.UIElements.BackgroundGradient then',
-            closeStart
-        ) or nil
+        -- ========================================================
+        -- Genie-style minimize
+        --
+        -- The real WindUI control tree is NEVER resized per-frame.
+        -- We hide it after creating a very small visual proxy:
+        --   * 7 cropped clones of only the window background shell
+        --   * 1 late-stage clone of the OpenButton
+        --
+        -- The strips move at slightly different rates, which creates the
+        -- curved / twisted "genie" shape. The real OpenButton stays hidden
+        -- until the morph has practically become the button.
+        -- ========================================================
+        local genieHelper = [=[
+local YE_GenieRunService=game:GetService"RunService"
+local YE_GenieTweenService=game:GetService"TweenService"
+local YE_GenieBusy=false
 
+local function YE_GenieClamp01(v)
+return math.clamp(v,0,1)
+end
+
+local function YE_GenieEase(v)
+v=YE_GenieClamp01(v)
+local inv=1-v
+return 1-inv*inv*inv*inv
+end
+
+local function YE_GenieLerp(a,b,t)
+return a+(b-a)*t
+end
+
+local function YE_GenieSetZ(root,z)
+if not root then
+return
+end
+
+if root:IsA"GuiObject"then
+root.ZIndex=z
+root.Active=false
+end
+
+for _,desc in ipairs(root:GetDescendants())do
+if desc:IsA"GuiObject"then
+desc.ZIndex=z
+desc.Active=false
+end
+end
+end
+
+local function YE_GenieDestroy(obj)
+if obj then
+pcall(function()
+obj:Destroy()
+end)
+end
+end
+
+local function YE_GenieSimpleFallback()
+local shell=aw.UIElements
+and aw.UIElements.Main
+and aw.UIElements.Main.Background
+
+if shell then
+shell.Size=UDim2.new(1,0,1,0)
+ap(
+shell,
+0.16,
+{Size=UDim2.new(0.965,0,0.90,0),ImageTransparency=1},
+Enum.EasingStyle.Quint,
+Enum.EasingDirection.InOut
+):Play()
+end
+end
+
+local function YE_GenieBounceOpenButton(targetButton,baseScale)
+if not aw.OpenButtonMain
+or not targetButton
+or not aw.Closed
+or aw.Destroyed then
+return
+end
+
+aw.OpenButtonMain:Visible(true)
+
+local scaleObj=targetButton:FindFirstChildOfClass"UIScale"
+
+if not scaleObj then
+return
+end
+
+baseScale=baseScale or scaleObj.Scale or 1
+scaleObj.Scale=baseScale*0.78
+
+local t1=YE_GenieTweenService:Create(
+scaleObj,
+TweenInfo.new(0.105,Enum.EasingStyle.Back,Enum.EasingDirection.Out),
+{Scale=baseScale*1.12}
+)
+t1:Play()
+t1.Completed:Wait()
+
+if not aw.Closed or aw.Destroyed then
+scaleObj.Scale=baseScale
+return
+end
+
+local t2=YE_GenieTweenService:Create(
+scaleObj,
+TweenInfo.new(0.07,Enum.EasingStyle.Quad,Enum.EasingDirection.InOut),
+{Scale=baseScale*0.96}
+)
+t2:Play()
+t2.Completed:Wait()
+
+if not aw.Closed or aw.Destroyed then
+scaleObj.Scale=baseScale
+return
+end
+
+local t3=YE_GenieTweenService:Create(
+scaleObj,
+TweenInfo.new(0.11,Enum.EasingStyle.Back,Enum.EasingDirection.Out),
+{Scale=baseScale}
+)
+t3:Play()
+end
+
+local function YE_GenieMinimize()
+if YE_GenieBusy then
+return
+end
+
+YE_GenieBusy=true
+
+if not aw.OpenButtonMain
+or not aw.OpenButtonMain.Button
+or not aw.IsOpenButtonEnabled
+or aw.IsPC then
+YE_GenieSimpleFallback()
+task.delay(0.2,function()
+YE_GenieBusy=false
+end)
+return
+end
+
+-- The real OpenButton is explicitly kept hidden while the window morphs.
+aw.OpenButtonMain:Visible(false)
+
+task.spawn(function()
+local stripRoot=nil
+local buttonGhostGroup=nil
+
+local ok,err=pcall(function()
+local windowRoot=aw.UIElements.Main
+local sourceShell=windowRoot and windowRoot.Background
+local targetButton=aw.OpenButtonMain.Button
+local targetContainer=targetButton and targetButton.Parent
+
+if not windowRoot
+or not sourceShell
+or not targetButton
+or not targetContainer then
+error("missing window/OpenButton visual objects")
+end
+
+local startPos=windowRoot.AbsolutePosition
+local startSize=windowRoot.AbsoluteSize
+
+if startSize.X<8 or startSize.Y<8 then
+error("window has invalid AbsoluteSize")
+end
+
+local startCenter=Vector2.new(
+startPos.X+startSize.X/2,
+startPos.Y+startSize.Y/2
+)
+
+local targetSize=targetButton.AbsoluteSize
+local targetScaleObj=targetButton:FindFirstChildOfClass"UIScale"
+local baseScale=targetScaleObj and targetScaleObj.Scale or 1
+
+if targetSize.X<8 or targetSize.Y<8 then
+local textWidth=0
+
+if targetButton:FindFirstChild"TextButton"then
+textWidth=targetButton.TextButton.AbsoluteSize.X
+end
+
+targetSize=Vector2.new(
+math.max(64,(textWidth>1 and textWidth+44 or 132)*baseScale),
+math.max(30,44*baseScale)
+)
+end
+
+local screenSize=av.WindUI
+and av.WindUI.ScreenGui
+and av.WindUI.ScreenGui.AbsoluteSize
+or Vector2.new(1920,1080)
+
+local targetUDim=targetContainer.Position
+local targetCenter=Vector2.new(
+screenSize.X*targetUDim.X.Scale+targetUDim.X.Offset,
+screenSize.Y*targetUDim.Y.Scale+targetUDim.Y.Offset
+)
+
+-- Build an absolute-pixel overlay next to the real window. It contains
+-- only a handful of visual objects, not the user's controls.
+stripRoot=Instance.new"CanvasGroup"
+stripRoot.Name="YeGenieStrips"
+stripRoot.BackgroundTransparency=1
+stripRoot.GroupTransparency=0
+stripRoot.Size=UDim2.fromOffset(screenSize.X,screenSize.Y)
+stripRoot.Position=UDim2.fromOffset(0,0)
+stripRoot.ZIndex=100000
+stripRoot.Parent=windowRoot.Parent
+
+local slices={}
+local sliceCount=7
+local startSliceHeight=startSize.Y/sliceCount
+
+for index=1,sliceCount do
+local holder=Instance.new"Frame"
+holder.Name="Slice"..index
+holder.BackgroundTransparency=1
+holder.ClipsDescendants=true
+holder.AnchorPoint=Vector2.new(0.5,0.5)
+holder.Size=UDim2.fromOffset(startSize.X,startSliceHeight+2)
+holder.Position=UDim2.fromOffset(
+startCenter.X,
+startPos.Y+(index-0.5)*startSliceHeight
+)
+holder.ZIndex=100010+index
+holder.Parent=stripRoot
+
+local shellClone=nil
+local cloneOK,cloned=pcall(function()
+return sourceShell:Clone()
+end)
+
+if cloneOK and cloned then
+shellClone=cloned
+
+for _,desc in ipairs(shellClone:GetDescendants())do
+if desc:IsA"VideoFrame"then
+desc:Destroy()
+end
+end
+
+shellClone.AnchorPoint=Vector2.new(0,0)
+shellClone.Position=UDim2.fromOffset(
+0,
+-(index-1)*startSliceHeight
+)
+shellClone.Size=UDim2.fromOffset(startSize.X,startSize.Y)
+YE_GenieSetZ(shellClone,100020+index)
+shellClone.Parent=holder
+else
+shellClone=Instance.new"Frame"
+shellClone.BackgroundColor3=
+sourceShell:IsA"GuiObject"
+and sourceShell.BackgroundColor3
+or Color3.fromRGB(28,28,30)
+shellClone.BackgroundTransparency=0.08
+shellClone.Size=UDim2.fromScale(1,1)
+shellClone.ZIndex=100020+index
+shellClone.Parent=holder
+end
+
+slices[index]={
+Holder=holder,
+Shell=shellClone,
+}
+end
+
+-- A tiny clone of the OpenButton only appears during the final part of
+-- the morph. It is NOT visible at the destination from the beginning.
+buttonGhostGroup=Instance.new"CanvasGroup"
+buttonGhostGroup.Name="YeGenieButtonGhost"
+buttonGhostGroup.BackgroundTransparency=1
+buttonGhostGroup.GroupTransparency=1
+buttonGhostGroup.AnchorPoint=Vector2.new(0.5,0.5)
+buttonGhostGroup.Size=UDim2.fromOffset(
+math.max(targetSize.X,1),
+math.max(targetSize.Y,1)
+)
+buttonGhostGroup.Position=UDim2.fromOffset(
+startCenter.X,
+startCenter.Y
+)
+buttonGhostGroup.ZIndex=100100
+buttonGhostGroup.Parent=windowRoot.Parent
+
+local ghostScale=Instance.new"UIScale"
+ghostScale.Scale=1.55
+ghostScale.Parent=buttonGhostGroup
+
+local ghostContainer=targetContainer:Clone()
+ghostContainer.Visible=true
+ghostContainer.Active=false
+ghostContainer.AnchorPoint=Vector2.new(0.5,0.5)
+ghostContainer.Position=UDim2.fromScale(0.5,0.5)
+ghostContainer.Size=UDim2.fromOffset(
+math.max(targetSize.X,1),
+math.max(targetSize.Y,1)
+)
+YE_GenieSetZ(ghostContainer,100110)
+ghostContainer.Parent=buttonGhostGroup
+
+-- The expensive real window disappears only after its shell has been
+-- captured into the proxy.
+windowRoot.Visible=false
+
+local duration=0.50
+local started=os.clock()
+local targetAbove=targetCenter.Y<startCenter.Y
+local mostlyVertical=
+math.abs(targetCenter.Y-startCenter.Y)
+>=math.abs(targetCenter.X-startCenter.X)
+
+while true do
+if not aw.Closed or aw.Destroyed then
+return
+end
+
+local raw=(os.clock()-started)/duration
+local p=YE_GenieClamp01(raw)
+
+for index=1,sliceCount do
+local slice=slices[index]
+local s=(index-0.5)/sliceCount
+
+-- The edge nearest the OpenButton moves first. The opposite edge
+-- follows a fraction later, making the whole window bend.
+local delay
+
+if targetAbove then
+delay=(s)*0.12
+else
+delay=(1-s)*0.12
+end
+
+local localP=YE_GenieClamp01((p-delay)/(1-delay))
+local e=YE_GenieEase(localP)
+
+local startSliceCenterY=
+startPos.Y+(index-0.5)*startSliceHeight
+local targetSliceHeight=targetSize.Y/sliceCount
+local targetSliceCenterY=
+targetCenter.Y-targetSize.Y/2
++(index-0.5)*targetSliceHeight
+
+local cx=YE_GenieLerp(startCenter.X,targetCenter.X,e)
+local cy=YE_GenieLerp(
+startSliceCenterY,
+targetSliceCenterY,
+e
+)
+
+-- Perpendicular bow/twist. This disappears at both endpoints,
+-- so the proxy starts perfectly on the window and ends perfectly
+-- on the OpenButton.
+local arch=math.sin(math.pi*e)
+local stripWave=math.sin((s-0.5)*math.pi)
+local bend=stripWave
+*math.min(95,startSize.X*0.15)
+*arch
+
+if mostlyVertical then
+cx=cx+bend
+else
+cy=cy+bend*0.45
+end
+
+local width=YE_GenieLerp(
+startSize.X,
+targetSize.X,
+e
+)
+
+-- Middle strips pinch slightly harder during the travel.
+local pinch=
+1-(0.12*math.sin(math.pi*s)*arch)
+width=math.max(2,width*pinch)
+
+local fullHeight=YE_GenieLerp(
+startSize.Y,
+targetSize.Y,
+e
+)
+local sliceHeight=math.max(
+2,
+fullHeight/sliceCount+2
+)
+
+slice.Holder.Position=UDim2.fromOffset(cx,cy)
+slice.Holder.Size=UDim2.fromOffset(width,sliceHeight)
+
+if slice.Shell then
+slice.Shell.Size=UDim2.fromOffset(
+width,
+math.max(fullHeight,2)
+)
+slice.Shell.Position=UDim2.fromOffset(
+0,
+-(index-1)*(fullHeight/sliceCount)
+)
+end
+end
+
+-- At the end, the moving warped shell itself gradually becomes a
+-- real-looking OpenButton clone.
+local ghostP=YE_GenieClamp01((p-0.67)/0.33)
+local ghostE=YE_GenieEase(ghostP)
+
+buttonGhostGroup.GroupTransparency=1-ghostE
+buttonGhostGroup.Position=UDim2.fromOffset(
+YE_GenieLerp(startCenter.X,targetCenter.X,ghostE),
+YE_GenieLerp(startCenter.Y,targetCenter.Y,ghostE)
+)
+ghostScale.Scale=YE_GenieLerp(1.55,1,ghostE)
+
+-- Let the strips disappear only while the OpenButton appearance is
+-- already taking over.
+stripRoot.GroupTransparency=
+YE_GenieClamp01((p-0.79)/0.21)
+
+if raw>=1 then
+break
+end
+
+YE_GenieRunService.RenderStepped:Wait()
+end
+
+-- The proxy now visually IS the OpenButton. Swap it for the real one,
+-- then give the real button a small pop.
+YE_GenieDestroy(stripRoot)
+stripRoot=nil
+YE_GenieDestroy(buttonGhostGroup)
+buttonGhostGroup=nil
+
+if aw.Closed and not aw.Destroyed then
+YE_GenieBounceOpenButton(targetButton,baseScale)
+end
+end)
+
+-- Normal completion already clears these. This also cleans up safely if
+-- the window is reopened halfway through the morph.
+YE_GenieDestroy(stripRoot)
+YE_GenieDestroy(buttonGhostGroup)
+
+if not ok then
+warn("[WindUI YePerf] Genie animation failed; using safe fallback: "..tostring(err))
+
+if aw.Closed
+and not aw.Destroyed
+and aw.OpenButtonMain
+and aw.IsOpenButtonEnabled
+and not aw.IsPC then
+aw.OpenButtonMain:Visible(true)
+end
+
+YE_GenieSimpleFallback()
+end
+
+YE_GenieBusy=false
+end)
+end
+
+]=]
+
+        local genieOpenMarker = 'function aw.Open(C)'
+        local genieCloseMarker = 'function aw.Close(C)'
+        local closeTweenMarker = 'ap(aw.UIElements.Main,0.9,{'
+
+        local canPatchGenie =
+            yeFind(patched, genieOpenMarker, 1) ~= nil
+            and yeFind(patched, genieCloseMarker, 1) ~= nil
+            and yeFind(patched, closeTweenMarker, 1) ~= nil
+
+        local okGenieHelper = false
         local okOpen = false
         local okClose = false
 
-        if openStart and openEnd and closeStart and closeEnd then
-            local openShell = [=[
+        if canPatchGenie then
+            patched, okGenieHelper = yeReplaceOnce(
+                patched,
+                genieOpenMarker,
+                genieHelper .. '\nfunction aw.Open(C)',
+                "genie-helper"
+            )
+
+            local openScope = okGenieHelper
+                and yeFind(patched, 'function aw.Open(C)', 1)
+                or nil
+
+            if openScope then
+                local openStart = yeFind(
+                    patched,
+                    'aw.UIElements.Main.Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,100)',
+                    openScope
+                )
+
+                local openEnd = openStart and yeFind(
+                    patched,
+                    'if aw.UIElements.BackgroundGradient then',
+                    openStart
+                ) or nil
+
+                if openStart and openEnd then
+                    local openShell = [=[
+if aw.OpenButtonMain then
+aw.OpenButtonMain:Visible(false)
+end
+
+aw.UIElements.Main.Visible=true
 aw.UIElements.Main.Size=aw.Size
 
 local YE_WindowShell=aw.UIElements.Main.Background
@@ -786,52 +1273,55 @@ end
 
 ]=]
 
-            local closeShell = [=[
-local YE_WindowShell=aw.UIElements.Main.Background
+                    patched, okOpen = yeReplaceRangeKeepEnd(
+                        patched,
+                        openScope,
+                        'aw.UIElements.Main.Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,100)',
+                        'if aw.UIElements.BackgroundGradient then',
+                        openShell,
+                        "window-open-light-animation"
+                    )
+                end
+            end
 
-if YE_WindowShell then
-ap(
-YE_WindowShell,
-0.14,
-{Size=UDim2.new(0.975,0,0.975,0)},
-Enum.EasingStyle.Quint,
-Enum.EasingDirection.InOut
-):Play()
-end
+            local closeScope = yeFind(patched, 'function aw.Close(C)', 1)
 
-]=]
-
-            patched, okOpen = yeReplaceRangeKeepEnd(
-                patched,
-                openScope,
-                'aw.UIElements.Main.Size=UDim2.new(aw.Size.X.Scale,aw.Size.X.Offset,0,100)',
-                'if aw.UIElements.BackgroundGradient then',
-                openShell,
-                "window-open-shell-animation"
-            )
-
-            closeScope = yeFind(patched, 'function aw.Close(C)', 1)
-            if okOpen and closeScope then
-                patched, okClose = yeReplaceRangeKeepEnd(
+            if closeScope then
+                local closeStart = yeFind(
                     patched,
-                    closeScope,
-                    'ap(aw.UIElements.Main,0.9,{',
-                    'if aw.UIElements.BackgroundGradient then',
-                    closeShell,
-                    "window-close-shell-animation"
+                    closeTweenMarker,
+                    closeScope
                 )
+
+                local closeEnd = closeStart and yeFind(
+                    patched,
+                    'if aw.UIElements.BackgroundGradient then',
+                    closeStart
+                ) or nil
+
+                if closeStart and closeEnd then
+                    patched, okClose = yeReplaceRangeKeepEnd(
+                        patched,
+                        closeScope,
+                        closeTweenMarker,
+                        'if aw.UIElements.BackgroundGradient then',
+                        'YE_GenieMinimize()\n\n',
+                        "window-close-genie-animation"
+                    )
+                end
             end
         end
 
-        mark(okOpen, "window-open-shell-animation")
-        mark(okClose, "window-close-shell-animation")
+        mark(okGenieHelper, "genie-helper")
+        mark(okOpen, "window-open-light-animation")
+        mark(okClose, "window-close-genie-animation")
 
         if okClose then
             local okCloseWait
             patched, okCloseWait = yeReplaceOnce(
                 patched,
                 'task.spawn(function()\ntask.wait(0.4)\n\nif not aw.Closed then',
-                'task.spawn(function()\ntask.wait(0.18)\n\nif not aw.Closed then',
+                'task.spawn(function()\ntask.wait(0.56)\n\nif not aw.Closed then',
                 "window-close-hide-delay"
             )
             mark(okCloseWait, "window-close-hide-delay")
@@ -840,7 +1330,7 @@ end
             patched, okDestroyWait = yeReplaceOnce(
                 patched,
                 'aw.Destroyed=true\n\ntask.wait(0.4)\n\nav.WindUI.ScreenGui:Destroy()',
-                'aw.Destroyed=true\n\ntask.wait(0.22)\n\nav.WindUI.ScreenGui:Destroy()',
+                'aw.Destroyed=true\n\ntask.wait(0.60)\n\nav.WindUI.ScreenGui:Destroy()',
                 "window-destroy-delay"
             )
             mark(okDestroyWait, "window-destroy-delay")
