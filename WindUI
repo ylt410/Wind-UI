@@ -1068,9 +1068,15 @@ p.Theme=r
 p.UpdateTheme(nil,false)
 end
 
+local yeLastAppliedFont=p.Font
+
 function p.AddFontObject(r)
 table.insert(p.FontObjects,r)
+if p.Font~=yeLastAppliedFont then
 p.UpdateFont(p.Font)
+else
+r.FontFace=Font.new(p.Font,r.FontFace.Weight,r.FontFace.Style)
+end
 end
 
 function p.UpdateFont(r)
@@ -1078,6 +1084,7 @@ p.Font=r
 for u,v in next,p.FontObjects do
 v.FontFace=Font.new(r,v.FontFace.Weight,v.FontFace.Style)
 end
+yeLastAppliedFont=r
 end
 
 function p.GetThemeProperty(r,u)
